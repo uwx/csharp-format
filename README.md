@@ -42,6 +42,23 @@ and C# 14 `extension` blocks.
 
 ## Install
 
+### .NET tool
+
+RID-specific tool packages need the **.NET 10 SDK or newer**. Windows x64,
+Linux x64 and macOS arm64 builds are packaged; the installer picks the right
+binary for the current machine.
+
+```sh
+# once published to nuget.org
+dotnet tool install -g csharp-format
+
+# or straight from the GitHub release assets
+gh release download --pattern '*.nupkg' --dir nupkg
+dotnet tool install -g csharp-format --version <version> --add-source ./nupkg
+```
+
+### From source
+
 ```sh
 git clone <repository-url>
 cd csharp-format
@@ -57,8 +74,9 @@ Requirements:
 - A network connection on the first build: the C# grammar is pinned to a
   `tree-sitter/tree-sitter-c-sharp` git revision that supports C# 14
   (revision `f2dea45`). `Cargo.lock` records the exact revision.
-- The `.NET 10` SDK only for the optional ReSharper comparison tooling in
-  `jbtmp/` (`dotnet jb cleanupcode`).
+- The .NET 10 SDK only for `dotnet tool install` and for the optional
+  ReSharper comparison tooling in `jbtmp/` (`dotnet jb cleanupcode`). The
+  binary itself has no .NET dependency.
 
 ## Quick start
 

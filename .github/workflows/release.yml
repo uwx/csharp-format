@@ -18,12 +18,18 @@ env:
 
 jobs:
   build:
-    name: Build (${{ matrix.os }})
+    name: Build (${{ matrix.rid }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: windows-latest
+            rid: win-x64
+          - os: macos-latest
+            rid: osx-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +40,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.os }}
+          shared-key: ${{ matrix.rid }}
 
       - name: Check formatting
         if: runner.os == 'Linux'
@@ -50,9 +56,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          name="csharp-format-${RUNNER_OS}-${RUNNER_ARCH}"
           mkdir -p dist
-          cp README.md USAGE.md AGENTS.md LICENSE dist/
+          cp README.md USAGE.md AGENTS.md BENCHMARK.md LICENSE dist/
           for bin in csharp-format csformat-verify; do
             if [ -f "target/release/${bin}.exe" ]; then
               cp "target/release/${bin}.exe" dist/
@@ -60,12 +65,12 @@ jobs:
               cp "target/release/${bin}" dist/
             fi
           done
-          tar -czf "${name}.tar.gz" -C dist .
+          tar -czf "csharp-format-${{ matrix.rid }}.tar.gz" -C dist .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ runner.os }}-${{ runner.arch }}
+          name: ${{ matrix.rid }}
           path: csharp-format-*.tar.gz
           if-no-files-found: error
 
@@ -75,13 +80,98 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      # Optional. When set, tagged builds are also published to nuget.org.
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
 
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+            version="${base}-nightly.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Packaging version ${version}"
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Pack .NET tool packages
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p bins nupkg
+
+          for tarball in artifacts/csharp-format-*.tar.gz; do
+            rid=$(basename "$tarball")
+            rid=${rid#csharp-format-}
+            rid=${rid%.tar.gz}
+            mkdir -p "bins/$rid"
+            tar -xzf "$tarball" -C "bins/$rid"
+          done
+
+          # A partial build must not produce a pointer package that advertises
+          # RID packages which do not exist.
+          for rid in linux-x64 win-x64 osx-arm64; do
+            if [ ! -d "bins/$rid" ]; then
+              echo "::error::missing build artifact for $rid"
+              exit 1
+            fi
+          done
+
+          args=()
+          for dir in bins/*/; do
+            rid=$(basename "$dir")
+            binary=$(find "$dir" -maxdepth 1 -type f \
+              \( -name 'csharp-format' -o -name 'csharp-format.exe' \) | head -n1)
+            if [ -z "$binary" ]; then
+              echo "::error::no csharp-format binary in $dir"
+              exit 1
+            fi
+            args+=(--binary "$rid=$binary")
+          done
+
+          python3 scripts/pack_dotnet_tool.py \
+            --version "$VERSION" \
+            --out nupkg \
+            --project-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --repository-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            "${args[@]}"
+
+          ls -l nupkg
+
+      - name: Publish to NuGet
+        if: startsWith(github.ref, 'refs/tags/v') && env.NUGET_API_KEY != ''
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # RID packages first: the pointer package references them by version.
+          for pkg in nupkg/*.nupkg; do
+            name=$(basename "$pkg")
+            if [ "$name" = "csharp-format.$VERSION.nupkg" ]; then
+              continue
+            fi
+            dotnet nuget push "$pkg" --api-key "$NUGET_API_KEY" \
+              --source https://api.nuget.org/v3/index.json --skip-duplicate
+          done
+          dotnet nuget push "nupkg/csharp-format.$VERSION.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json --skip-duplicate
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -92,5 +182,7 @@ jobs:
           name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Nightly' }}
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
           generate_release_notes: true
-          files: artifacts/csharp-format-*.tar.gz
+          files: |
+            artifacts/csharp-format-*.tar.gz
+            nupkg/*.nupkg
           fail_on_unmatched_files: true

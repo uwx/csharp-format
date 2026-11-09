@@ -28,6 +28,32 @@ verification and CI integration. For an overview and benchmark figures see
 
 ## Install
 
+### .NET tool
+
+RID-specific tool packages need the **.NET 10 SDK or newer**. The release
+workflow publishes Windows x64, Linux x64 and macOS arm64 packages; the
+installer selects the binary for the current platform.
+
+```sh
+# from nuget.org, once published
+dotnet tool install -g csharp-format
+
+# from the GitHub release assets
+gh release download --pattern '*.nupkg' --dir nupkg
+dotnet tool install -g csharp-format --version <version> --add-source ./nupkg
+
+csharp-format --version
+```
+
+Building the packages locally:
+
+```sh
+python3 scripts/pack_dotnet_tool.py --version 0.1.0 --out dist/nupkg \
+  --binary win-x64=target/release/csharp-format.exe
+```
+
+### From source
+
 ```sh
 git clone <repository-url>
 cd csharp-format

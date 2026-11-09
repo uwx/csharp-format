@@ -66,6 +66,8 @@ idempotent, no new parse/lex errors).
 | `crates/csformat-verify/src/main.rs` | Corpus harness. |
 | `fixtures/` + `fixtures/expected/` | Small inputs and ReSharper-verified expected outputs (golden test). |
 | `scripts/jbcmp.sh` | Runs the real ReSharper CLI and diffs its output against ours. |
+| `scripts/pack_dotnet_tool.py` | Builds RID-specific `.nupkg` packages so the binary installs with `dotnet tool install`. |
+| `.github/workflows/release.yml` | CI: builds per-RID tarballs, packs the .NET tool packages, publishes the release (and nuget.org when `NUGET_API_KEY` is set). |
 | `jbtmp/` | Scratch project for ReSharper CLI probes. `t.sln`/`t.csproj` must stay; other files are scratch. |
 | `corpus/` | Reference corpora (not committed; 74 MB). |
 
