@@ -221,8 +221,61 @@ jobs:
             gh release create "$tag" "${args[@]}"
           fi
 
-          # --clobber replaces each asset in place. The previous
-          # softprops/action-gh-release step deleted and re-uploaded assets and
-          # intermittently lost the delete/upload race ("already_exists").
-          gh release upload "$tag" \
-            artifacts/csharp-format-*.tar.gz nupkg/*.nupkg --clobber
+          release_id=$(gh release view "$tag" --json databaseId --jq .databaseId)
+          api="repos/${GITHUB_REPOSITORY}/releases"
+
+          is_ours() {
+            case "$1" in
+              csharp-format*.nupkg | csharp-format-*.tar.gz) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # Delete the assets this workflow owns. The nightly release is reused
+          # on every run, and a re-run of a tag workflow replaces its own too.
+          while IFS=$'\t' read -r id name; do
+            if is_ours "$name"; then
+              echo "deleting asset ${name}"
+              gh api -X DELETE "${api}/assets/${id}" >/dev/null
+            fi
+          done < <(gh api "${api}/${release_id}/assets" --paginate \
+            --jq '.[] | [.id, .name] | @tsv')
+
+          # Deleting an asset is not immediately visible to the upload
+          # endpoint: re-uploading the same name right away can fail with
+          # 422 "ReleaseAsset.name already exists". Wait until the assets stop
+          # being listed.
+          for attempt in $(seq 1 30); do
+            remaining=0
+            while IFS=$'\t' read -r _id name; do
+              if is_ours "$name"; then remaining=$((remaining + 1)); fi
+            done < <(gh api "${api}/${release_id}/assets" --paginate \
+              --jq '.[] | [.id, .name] | @tsv')
+            if [ "$remaining" -eq 0 ]; then
+              break
+            fi
+            echo "waiting for ${remaining} deleted asset(s) to disappear"
+            sleep 2
+          done
+
+          # Upload one file at a time, retrying while the deletion settles.
+          for file in artifacts/csharp-format-*.tar.gz nupkg/*.nupkg; do
+            name=$(basename "$file")
+            for attempt in $(seq 1 8); do
+              if gh release upload "$tag" "$file" >/dev/null \
+                2>"${RUNNER_TEMP}/upload.err"; then
+                echo "uploaded ${name}"
+                break
+              fi
+              if ! grep -q "already exists" "${RUNNER_TEMP}/upload.err"; then
+                cat "${RUNNER_TEMP}/upload.err"
+                exit 1
+              fi
+              if [ "$attempt" -eq 8 ]; then
+                cat "${RUNNER_TEMP}/upload.err"
+                exit 1
+              fi
+              echo "${name} is still propagating; retrying in $((attempt * 5))s"
+              sleep $((attempt * 5))
+            done
+          done
