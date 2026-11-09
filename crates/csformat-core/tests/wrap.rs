@@ -241,3 +241,64 @@ fn wrap_style_keys_are_resolved() {
     assert_eq!(options.wrap.max_arguments_on_line, Some(2));
     assert!(options.warnings.is_empty(), "{:?}", options.warnings);
 }
+
+#[test]
+fn granular_space_overrides_match_resharper() {
+    // Verified with the ReSharper CLI using the same .editorconfig keys.
+    let mut options = FormatOptions::default();
+    options.insert_final_newline = true;
+    let mut applied = Vec::new();
+    for (key, value) in [
+        (
+            "resharper_csharp_space_before_method_call_parentheses",
+            "true",
+        ),
+        ("resharper_csharp_space_within_parentheses", "true"),
+        ("resharper_csharp_space_within_if_parentheses", "true"),
+        (
+            "resharper_csharp_space_before_array_access_brackets",
+            "true",
+        ),
+        ("resharper_csharp_space_before_method_parentheses", "true"),
+    ] {
+        apply_key(
+            &mut options,
+            key,
+            value,
+            Path::new(".editorconfig"),
+            &mut applied,
+        );
+    }
+    let source = "class C
+{
+    int M(int a)
+    {
+        if (a > 0)
+        {
+            return M(a) + a[0];
+        }
+        var z = (a + a) * 2;
+        return z;
+    }
+
+    int M2(int b) => b;
+}
+";
+    let expected = "class C
+{
+    int M (int a)
+    {
+        if ( a > 0 )
+        {
+            return M (a) + a [0];
+        }
+
+        var z = ( a + a ) * 2;
+        return z;
+    }
+
+    int M2 (int b) => b;
+}
+";
+    assert_eq!(format(source, &options), expected);
+}

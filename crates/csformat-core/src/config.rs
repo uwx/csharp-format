@@ -11,7 +11,7 @@
 //! Both dialects ultimately write into [`FormatOptions`]. Every applied key is recorded so
 //! that `csharp-format config` can explain exactly where an option came from.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -170,6 +170,10 @@ pub struct SpaceOptions {
     /// declaration on the same line. ReSharper's
     /// `resharper_csharp_max_attribute_length_for_same_line`.
     pub max_attribute_length_for_same_line: usize,
+    /// Granular ReSharper `resharper_space_*` overrides, keyed by the part after
+    /// `resharper_space_` (for example `around_additive_op`). The emitter falls back to
+    /// ReSharper's default when a key is absent.
+    pub resharper: BTreeMap<String, bool>,
 }
 
 impl Default for SpaceOptions {
@@ -201,6 +205,7 @@ impl Default for SpaceOptions {
             before_colon_in_conditional: true,
             after_colon_in_conditional: true,
             max_attribute_length_for_same_line: 40,
+            resharper: BTreeMap::new(),
         }
     }
 }
@@ -1128,6 +1133,20 @@ pub fn apply_key(
             value: value_trim.to_owned(),
         });
     };
+
+    if let Some(rest) = key.strip_prefix("resharper_space_") {
+        match parse_bool(value_trim) {
+            Some(v) => {
+                options.space.resharper.insert(rest.to_owned(), v);
+                push(&key);
+            }
+            None => options.warnings.push(format!(
+                "{}: invalid boolean for {key}: {value_trim:?}",
+                path.display()
+            )),
+        }
+        return;
+    }
 
     match key.as_str() {
         "indent_style" => match v.as_str() {

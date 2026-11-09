@@ -2000,6 +2000,101 @@ impl<'a> Emitter<'a> {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn rsharp_space(options: &FormatOptions, key: &str, default: bool) -> bool {
+    options.space.resharper.get(key).copied().unwrap_or(default)
+}
+
+/// The granular `resharper_space_around_*_op` override for an operator, if set.
+fn binary_operator_space(options: &FormatOptions, operator: &str) -> Option<bool> {
+    let key = match operator {
+        "+" | "-" => "around_additive_op",
+        "*" | "/" | "%" => "around_multiplicative_op",
+        "<<" | ">>" | ">>>" => "around_shift_op",
+        "<" | ">" | "<=" | ">=" => "around_relational_op",
+        "==" | "!=" => "around_equality_op",
+        "&" | "|" | "^" => "around_bitwise_op",
+        "&&" | "||" => "around_logical_op",
+        "??" => "around_nullcoalescing_op",
+        "=>" => "around_arrow_op",
+        _ if is_assignment_operator(operator) => "around_assignment_op",
+        _ => return None,
+    };
+    options.space.resharper.get(key).copied()
+}
+
+fn before_paren_space(options: &FormatOptions, kind: ParenKind, default: bool) -> bool {
+    let key = match kind {
+        ParenKind::If => "before_if_parentheses",
+        ParenKind::While => "before_while_parentheses",
+        ParenKind::For => "before_for_parentheses",
+        ParenKind::ForEach => "before_foreach_parentheses",
+        ParenKind::Switch => "before_switch_parentheses",
+        ParenKind::Catch => "before_catch_parentheses",
+        ParenKind::Using => "before_using_parentheses",
+        ParenKind::Lock => "before_lock_parentheses",
+        ParenKind::Fixed => "before_fixed_parentheses",
+        ParenKind::Checked => "before_checked_parentheses",
+        ParenKind::TypeOf => "before_typeof_parentheses",
+        ParenKind::SizeOf => "before_sizeof_parentheses",
+        ParenKind::Default => "before_default_parentheses",
+        ParenKind::ArgumentList | ParenKind::AttributeArguments => "before_method_call_parentheses",
+        ParenKind::ParameterList | ParenKind::BracketedParameterList => "before_method_parentheses",
+        _ => return default,
+    };
+    rsharp_space(options, key, default)
+}
+
+fn within_paren_space(options: &FormatOptions, kind: ParenKind, default: bool) -> bool {
+    let key = match kind {
+        ParenKind::If => "within_if_parentheses",
+        ParenKind::While => "within_while_parentheses",
+        ParenKind::For => "within_for_parentheses",
+        ParenKind::ForEach => "within_foreach_parentheses",
+        ParenKind::Switch => "within_switch_parentheses",
+        ParenKind::Catch => "within_catch_parentheses",
+        ParenKind::Using => "within_using_parentheses",
+        ParenKind::Lock => "within_lock_parentheses",
+        ParenKind::Fixed => "within_fixed_parentheses",
+        ParenKind::Checked => "within_checked_parentheses",
+        ParenKind::TypeOf => "within_typeof_parentheses",
+        ParenKind::SizeOf => "within_sizeof_parentheses",
+        ParenKind::Default => "within_default_parentheses",
+        ParenKind::ArgumentList
+        | ParenKind::AttributeArguments
+        | ParenKind::ParameterList
+        | ParenKind::BracketedParameterList => return default,
+        ParenKind::Parenthesized | ParenKind::Tuple | ParenKind::Cast => "within_parentheses",
+        _ => return default,
+    };
+    rsharp_space(options, key, default)
+}
+
+/// Roslyn fallback for the space inside a parenthesis group.
+fn paren_within_default(options: &FormatOptions, kind: ParenKind) -> bool {
+    match kind {
+        ParenKind::ArgumentList | ParenKind::AttributeArguments => {
+            options.space.method_call_parameter_list_parentheses
+        }
+        ParenKind::ParameterList | ParenKind::BracketedParameterList => {
+            options.space.method_declaration_parameter_list_parentheses
+        }
+        _ => options.space.between_parentheses,
+    }
+}
+
+fn within_bracket_space(options: &FormatOptions, kind: BracketKind, default: bool) -> bool {
+    let key = match kind {
+        BracketKind::ElementAccess => "within_array_access_brackets",
+        BracketKind::ArrayRank => "within_array_rank_brackets",
+        BracketKind::Attribute => "within_attribute_brackets",
+        BracketKind::CollectionExpression | BracketKind::ListPattern => {
+            "within_list_pattern_brackets"
+        }
+        _ => return default,
+    };
+    rsharp_space(options, key, default)
+}
+
 fn space_between(
     src: &str,
     tokens: &[Token],
@@ -2095,6 +2190,9 @@ fn space_between(
     if matches!(pt, "." | "->" | "::" | "?." | "?[")
         || matches!(ct, "." | "->" | "::" | "?." | "?[")
     {
+        if pt == "." || ct == "." {
+            return rsharp_space(options, "around_dot", false);
+        }
         return false;
     }
 
@@ -2142,9 +2240,10 @@ fn space_between(
             return empty_paren_space(prev, options);
         }
         if prev.ast.paren == ParenKind::Cast {
-            return false;
+            return rsharp_space(options, "between_typecast_parentheses", false);
         }
-        return options.space.between_parentheses;
+        let kind = prev.ast.paren;
+        return within_paren_space(options, kind, paren_within_default(options, kind));
     }
     // `(T)x` — no space between the cast and its operand unless configured.
     if pt == ")" && prev.ast.paren == ParenKind::Cast {
@@ -2154,20 +2253,41 @@ fn space_between(
         if pt == "(" {
             return empty_paren_space(prev, options);
         }
-        return options.space.between_parentheses;
+        let open = layout.enclosing_open[i];
+        let kind = if open != usize::MAX {
+            tokens[open].ast.paren
+        } else {
+            ParenKind::None
+        };
+        return within_paren_space(options, kind, paren_within_default(options, kind));
     }
 
     if pt == "[" {
         if ct == "]" {
-            return options.space.between_empty_square_brackets;
+            let key = match prev.ast.bracket {
+                BracketKind::ArrayRank => "within_array_rank_empty_brackets",
+                BracketKind::ElementAccess => "within_array_access_brackets",
+                _ => return options.space.between_empty_square_brackets,
+            };
+            return rsharp_space(options, key, options.space.between_empty_square_brackets);
         }
-        return options.space.between_square_brackets;
+        return within_bracket_space(
+            options,
+            prev.ast.bracket,
+            options.space.between_square_brackets,
+        );
     }
     if ct == "]" {
         if pt == "[" {
             return options.space.between_empty_square_brackets;
         }
-        return options.space.between_square_brackets;
+        let open = layout.enclosing_open[i];
+        let kind = if open != usize::MAX {
+            tokens[open].ast.bracket
+        } else {
+            BracketKind::None
+        };
+        return within_bracket_space(options, kind, options.space.between_square_brackets);
     }
     if ct == "[" {
         if pt == "new" {
@@ -2177,7 +2297,10 @@ fn space_between(
             return true;
         }
         return match cur.ast.bracket {
-            BracketKind::ElementAccess | BracketKind::ArrayRank => false,
+            BracketKind::ElementAccess => {
+                rsharp_space(options, "before_array_access_brackets", false)
+            }
+            BracketKind::ArrayRank => rsharp_space(options, "before_array_rank_brackets", false),
             BracketKind::Attribute => is_word(prev),
             BracketKind::Other => {
                 // Tree-sitter sometimes parses `T x = [ … ]` as an element binding;
@@ -2204,8 +2327,14 @@ fn space_between(
 
     if ct == "?" {
         return match cur.ast.operator {
-            OperatorKind::Ternary => options.space.before_question_in_conditional,
-            OperatorKind::Nullable | OperatorKind::None => false,
+            OperatorKind::Ternary => rsharp_space(
+                options,
+                "before_ternary_quest",
+                options.space.before_question_in_conditional,
+            ),
+            OperatorKind::Nullable | OperatorKind::None => {
+                rsharp_space(options, "before_nullable_mark", false)
+            }
             _ => is_word(prev),
         };
     }
@@ -2215,7 +2344,11 @@ fn space_between(
             return true;
         }
         return match prev.ast.operator {
-            OperatorKind::Ternary => options.space.after_question_in_conditional,
+            OperatorKind::Ternary => rsharp_space(
+                options,
+                "after_ternary_quest",
+                options.space.after_question_in_conditional,
+            ),
             OperatorKind::Nullable | OperatorKind::None => is_word(cur),
             _ => is_word(cur),
         };
@@ -2254,6 +2387,10 @@ fn space_between(
     }
 
     if is_binary_op(src, tokens, i) || is_binary_op(src, tokens, i - 1) {
+        let operator = if is_binary_op(src, tokens, i) { ct } else { pt };
+        if let Some(space) = binary_operator_space(options, operator) {
+            return space;
+        }
         return match options.space.around_binary_operators {
             crate::config::AroundBinary::BeforeAndAfter => true,
             crate::config::AroundBinary::None => false,
@@ -2364,10 +2501,34 @@ fn paren_space(
             if pt == "new" {
                 return false;
             }
-            options.space.method_call_name_and_open_paren
+            let empty = tokens.get(i + 1).is_some_and(|t| t.text(src) == ")");
+            if empty {
+                return rsharp_space(
+                    options,
+                    "before_empty_method_call_parentheses",
+                    options.space.method_call_name_and_open_paren,
+                );
+            }
+            before_paren_space(
+                options,
+                cur.ast.paren,
+                options.space.method_call_name_and_open_paren,
+            )
         }
         ParenKind::ParameterList | ParenKind::BracketedParameterList => {
-            options.space.method_declaration_name_and_open_paren
+            let empty = tokens.get(i + 1).is_some_and(|t| t.text(src) == ")");
+            if empty {
+                return rsharp_space(
+                    options,
+                    "before_empty_method_parentheses",
+                    options.space.method_declaration_name_and_open_paren,
+                );
+            }
+            before_paren_space(
+                options,
+                cur.ast.paren,
+                options.space.method_declaration_name_and_open_paren,
+            )
         }
         ParenKind::ConstructorInitializer => false,
         ParenKind::If
@@ -2379,8 +2540,14 @@ fn paren_space(
         | ParenKind::Using
         | ParenKind::Lock
         | ParenKind::Fixed
-        | ParenKind::Checked => options.space.after_keywords_in_control_flow,
-        ParenKind::TypeOf | ParenKind::SizeOf | ParenKind::Default => false,
+        | ParenKind::Checked => before_paren_space(
+            options,
+            cur.ast.paren,
+            options.space.after_keywords_in_control_flow,
+        ),
+        ParenKind::TypeOf | ParenKind::SizeOf | ParenKind::Default => {
+            before_paren_space(options, cur.ast.paren, false)
+        }
         ParenKind::Cast | ParenKind::Parenthesized | ParenKind::Tuple => {
             // Deliberately ignore `is_word(prev)`: a `(` right after an identifier is a
             // call/declaration that tree-sitter sometimes mislabels as a cast, and the
@@ -2419,13 +2586,15 @@ fn empty_paren_space(open: &Token, options: &FormatOptions) -> bool {
 fn colon_before(token: &Token, options: &FormatOptions) -> bool {
     match token.ast.colon {
         ColonKind::BaseList => options.space.before_colon_in_inheritance,
-        ColonKind::Ternary => options.space.before_colon_in_conditional,
+        ColonKind::Ternary => rsharp_space(
+            options,
+            "before_ternary_colon",
+            options.space.before_colon_in_conditional,
+        ),
+        ColonKind::SwitchLabel => rsharp_space(options, "before_colon_in_case", false),
+        ColonKind::AttributeTarget => rsharp_space(options, "before_attribute_colon", false),
         ColonKind::Constraint | ColonKind::ConstructorInitializer => true,
-        ColonKind::NamedArgument
-        | ColonKind::SwitchLabel
-        | ColonKind::Label
-        | ColonKind::Pattern
-        | ColonKind::AttributeTarget => false,
+        ColonKind::NamedArgument | ColonKind::Label | ColonKind::Pattern => false,
         ColonKind::None | ColonKind::Other => false,
     }
 }
@@ -2433,13 +2602,18 @@ fn colon_before(token: &Token, options: &FormatOptions) -> bool {
 fn colon_after(token: &Token, options: &FormatOptions) -> bool {
     match token.ast.colon {
         ColonKind::BaseList => options.space.after_colon_in_inheritance,
-        ColonKind::Ternary => options.space.after_colon_in_conditional,
+        ColonKind::Ternary => rsharp_space(
+            options,
+            "after_ternary_colon",
+            options.space.after_colon_in_conditional,
+        ),
+        ColonKind::SwitchLabel => rsharp_space(options, "after_colon_in_case", true),
+        ColonKind::AttributeTarget => rsharp_space(options, "after_attribute_colon", true),
         ColonKind::Constraint
         | ColonKind::NamedArgument
         | ColonKind::Pattern
-        | ColonKind::ConstructorInitializer
-        | ColonKind::AttributeTarget => true,
-        ColonKind::SwitchLabel | ColonKind::Label => true,
+        | ColonKind::ConstructorInitializer => true,
+        ColonKind::Label => true,
         ColonKind::None | ColonKind::Other => true,
     }
 }
