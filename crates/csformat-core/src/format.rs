@@ -5,7 +5,7 @@
 //! the transformation trivially lossless: the sequence of tokens (and therefore all
 //! comments, directives and literals) is preserved exactly.
 
-use crate::config::{BraceCategory, EndOfLine, FormatOptions, IndentUnit};
+use crate::config::{BraceCategory, EndOfLine, FormatOptions, IndentUnit, WrapStyle};
 use crate::lexer::{Token, TokenKind, lex};
 use crate::syntax::{
     AngleKind, AttributePlacement, BraceKind, BraceOwner, BracketKind, ColonKind, CommaKind,
@@ -120,6 +120,12 @@ struct Layout {
     generic_close: Vec<bool>,
     /// `true` for a token that may start a wrapped continuation line.
     wrap_candidate: Vec<bool>,
+    /// For every `(`/`[`/`{`, the matching closer (and the reverse for closers).
+    match_close: Vec<usize>,
+    /// Innermost enclosing `(`, `[` or `{` for every token (`usize::MAX` at top level).
+    enclosing_open: Vec<usize>,
+    /// Whether a space precedes each token; mirrors `space_between`, index 0 is `false`.
+    space_before: Vec<bool>,
 }
 
 impl Layout {
@@ -286,14 +292,39 @@ impl Layout {
             wrap_candidate[i] = after_comma || before_operator || after_assignment || before_member;
         }
 
-        Self {
+        let mut match_close = vec![usize::MAX; n];
+        let mut enclosing_open = vec![usize::MAX; n];
+        let mut open_stack: Vec<usize> = Vec::new();
+        for (i, token) in tokens.iter().enumerate() {
+            let text = token.text(source);
+            enclosing_open[i] = open_stack.last().copied().unwrap_or(usize::MAX);
+            match text {
+                "(" | "[" | "{" => open_stack.push(i),
+                ")" | "]" | "}" => {
+                    if let Some(open) = open_stack.pop() {
+                        match_close[open] = i;
+                        match_close[i] = open;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut layout = Self {
             brace_match,
             brace_inline,
             inside_inline,
             generic_open,
             generic_close,
             wrap_candidate,
-        }
+            match_close,
+            enclosing_open,
+            space_before: Vec::new(),
+        };
+        layout.space_before = (0..n)
+            .map(|i| i > 0 && space_between(source, tokens, &layout, options, i))
+            .collect();
+        layout
     }
 
     fn inline_close(&self, i: usize) -> bool {
@@ -430,6 +461,10 @@ struct Emitter<'a> {
     continuation_active: bool,
     at_line_start: bool,
     seq: u32,
+    /// For each opener, whether the group is chopped one element per line.
+    group_chop: Vec<Option<bool>>,
+    /// Elements of each group that have started on the current line.
+    group_elems: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -447,6 +482,19 @@ struct ParenFrame {
     indent: i32,
     kind: ParenKind,
     seq: u32,
+}
+
+/// Wrapping policy for a comma-separated list.
+#[derive(Clone, Copy, Debug)]
+struct GroupSpec {
+    style: WrapStyle,
+    max_on_line: Option<usize>,
+    after_lpar: bool,
+    before_rpar: bool,
+    before_comma: bool,
+    /// ReSharper keeps a simple single-line initializer/pattern inline even with
+    /// `chop_always`; only chop it when it is multiline or does not fit.
+    keeps_simple_inline: bool,
 }
 
 impl<'a> Emitter<'a> {
@@ -474,6 +522,8 @@ impl<'a> Emitter<'a> {
             last_code_column: 0,
             continuation_active: false,
             at_line_start: true,
+            group_chop: vec![None; tokens.len()],
+            group_elems: vec![0; tokens.len()],
         }
     }
 
@@ -563,6 +613,11 @@ impl<'a> Emitter<'a> {
         self.out.push_str(text);
         self.update_position(text);
         self.at_line_start = false;
+
+        if matches!(text, "(" | "[" | "{") {
+            self.decide_chop(i);
+        }
+        self.update_group_counts(i, newlines);
 
         if text == ":" && token.ast.colon == ColonKind::SwitchLabel {
             let labels = self.extra_columns(self.options.indent_switch_labels);
@@ -1135,6 +1190,11 @@ impl<'a> Emitter<'a> {
     /// Whether token `i` should start a wrapped line because the *next* run of tokens
     /// would not fit on the current one.
     fn should_wrap(&self, i: usize) -> bool {
+        // Chopped lists and per-line element limits force breaks regardless of the
+        // current line length.
+        if self.group_break(i) {
+            return true;
+        }
         // Lines that already were continuations of an aligned expression in the source are
         // left alone; ReSharper keeps their layout.
         if self.preserved_line {
@@ -1318,6 +1378,189 @@ impl<'a> Emitter<'a> {
     /// Previous non-trivia token index.
     fn prev_code(&self, i: usize) -> Option<usize> {
         (0..i).rev().find(|&j| !self.tokens[j].is_trivia())
+    }
+
+    /// Wrapping policy for the list delimited by `open`, if it is a list we wrap.
+    fn group_spec(&self, open: usize) -> Option<GroupSpec> {
+        let wrap = &self.options.wrap;
+        let token = &self.tokens[open];
+        let spec = |style: WrapStyle, max_on_line: Option<usize>, after_lpar, before_rpar| {
+            Some(GroupSpec {
+                style,
+                max_on_line,
+                after_lpar,
+                before_rpar,
+                before_comma: wrap.before_comma,
+                keeps_simple_inline: false,
+            })
+        };
+        match token.text(self.src) {
+            "(" => match token.ast.paren {
+                ParenKind::ArgumentList => spec(
+                    wrap.arguments,
+                    wrap.max_arguments_on_line,
+                    wrap.after_invocation_lpar,
+                    wrap.before_invocation_rpar,
+                ),
+                ParenKind::ParameterList | ParenKind::BracketedParameterList => spec(
+                    wrap.parameters,
+                    wrap.max_formal_parameters_on_line,
+                    wrap.after_declaration_lpar,
+                    wrap.before_declaration_rpar,
+                ),
+                _ => None,
+            },
+            "{" => match token.ast.brace {
+                BraceKind::Initializer => {
+                    let array = self
+                        .prev_code(open)
+                        .is_some_and(|p| self.tokens[p].text(self.src) == "]");
+                    let mut spec = if array {
+                        spec(
+                            wrap.array_initializer,
+                            wrap.max_array_initializer_elements_on_line,
+                            false,
+                            false,
+                        )
+                    } else {
+                        spec(
+                            wrap.object_initializer,
+                            wrap.max_initializer_elements_on_line,
+                            false,
+                            false,
+                        )
+                    };
+                    if let Some(spec) = spec.as_mut() {
+                        spec.keeps_simple_inline = true;
+                    }
+                    spec
+                }
+                BraceKind::EnumBody => spec(
+                    wrap.enum_declaration,
+                    wrap.max_enum_members_on_line,
+                    false,
+                    false,
+                ),
+                BraceKind::SwitchExpression => {
+                    let mut spec = spec(wrap.switch_expression, None, false, false);
+                    if let Some(spec) = spec.as_mut() {
+                        spec.keeps_simple_inline = true;
+                    }
+                    spec
+                }
+                BraceKind::Pattern => {
+                    let mut spec = spec(wrap.property_pattern, None, false, false);
+                    if let Some(spec) = spec.as_mut() {
+                        spec.keeps_simple_inline = true;
+                    }
+                    spec
+                }
+                _ => None,
+            },
+            "[" => match token.ast.bracket {
+                BracketKind::CollectionExpression | BracketKind::ListPattern => {
+                    let mut spec = spec(wrap.list_pattern, None, false, false);
+                    if let Some(spec) = spec.as_mut() {
+                        spec.keeps_simple_inline = true;
+                    }
+                    spec
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Decide, when the opener has been written, whether this group is chopped.
+    fn decide_chop(&mut self, open: usize) {
+        let Some(spec) = self.group_spec(open) else {
+            return;
+        };
+        let close = self.layout.match_close[open];
+        if close == usize::MAX {
+            return;
+        }
+        let multiline = (open + 1..=close).any(|j| self.tokens[j].gap.newlines > 0);
+        let width: usize = (open..=close)
+            .map(|j| {
+                let len = self.tokens[j].text(self.src).chars().count();
+                len + usize::from(j > open && self.layout.space_before[j])
+            })
+            .sum();
+        let too_long = self
+            .wrap_limit()
+            .is_some_and(|limit| self.line_len + width > limit);
+        let chop = match spec.style {
+            WrapStyle::WrapIfLong => false,
+            WrapStyle::ChopAlways if spec.keeps_simple_inline => multiline || too_long,
+            WrapStyle::ChopAlways => true,
+            WrapStyle::ChopIfLong => multiline || too_long,
+        };
+        self.group_chop[open] = Some(chop);
+    }
+
+    /// Forced break points inside a chopped group or a max-elements-per-line group.
+    fn group_break(&self, i: usize) -> bool {
+        let open = self.layout.enclosing_open[i];
+        if open == usize::MAX || self.layout.inside_inline[i] {
+            return false;
+        }
+        let Some(spec) = self.group_spec(open) else {
+            return false;
+        };
+        let text = self.tokens[i].text(self.src);
+        if self.group_chop[open] == Some(true) {
+            if i == self.layout.match_close[open] && spec.before_rpar {
+                return true;
+            }
+            if self.prev_code(i) == Some(open) && spec.after_lpar {
+                return true;
+            }
+            if text == "," && spec.before_comma {
+                return true;
+            }
+            if let Some(prev) = self.prev_code(i) {
+                if !spec.before_comma
+                    && self.tokens[prev].text(self.src) == ","
+                    && self.layout.enclosing_open[prev] == open
+                {
+                    return true;
+                }
+            }
+        }
+        if let (Some(prev), Some(max)) = (self.prev_code(i), spec.max_on_line) {
+            if self.tokens[prev].text(self.src) == ","
+                && self.layout.enclosing_open[prev] == open
+                && self.group_elems[open] >= max
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Reset per-line element counters for every group a new line starts inside, and
+    /// count the element that starts at token `i`.
+    fn update_group_counts(&mut self, i: usize, newlines: u32) {
+        if newlines > 0 {
+            let mut open = self.layout.enclosing_open[i];
+            while open != usize::MAX {
+                self.group_elems[open] = 0;
+                open = self.layout.enclosing_open[open];
+            }
+        }
+        let open = self.layout.enclosing_open[i];
+        if open == usize::MAX {
+            return;
+        }
+        let starts_element = self.prev_code(i).is_some_and(|prev| {
+            prev == open
+                || (self.tokens[prev].text(self.src) == ","
+                    && self.layout.enclosing_open[prev] == open)
+        });
+        if starts_element {
+            self.group_elems[open] += 1;
+        }
     }
 
     fn newlines_before(&self, i: usize) -> u32 {
@@ -1716,394 +1959,400 @@ impl<'a> Emitter<'a> {
 
     /// Whether a space separates token `i` from its predecessor on the same line.
     fn should_space(&self, i: usize) -> bool {
-        let prev = &self.tokens[i - 1];
-        let cur = &self.tokens[i];
-        let pt = prev.text(self.src);
-        let ct = cur.text(self.src);
+        space_between(self.src, self.tokens, self.layout, self.options, i)
+    }
+}
 
-        if prev.is_trivia() || cur.is_trivia() {
-            if prev.kind == TokenKind::BlockComment && cur.gap.newlines == 0 {
-                let before = if i >= 2 {
-                    self.tokens[i - 2].text(self.src)
-                } else {
-                    ""
-                };
-                // A comment at statement position is separated from the statement; elsewhere
-                // the author's spacing is kept (`for ( /**/; …)`).
-                if matches!(before, "{" | ";" | "}" | "=>" | ":") {
-                    return true;
-                }
-                return cur.gap.spaces > 0 || cur.gap.tabs > 0;
+#[allow(clippy::too_many_arguments)]
+fn space_between(
+    src: &str,
+    tokens: &[Token],
+    layout: &Layout,
+    options: &FormatOptions,
+    i: usize,
+) -> bool {
+    let prev = &tokens[i - 1];
+    let cur = &tokens[i];
+    let pt = prev.text(src);
+    let ct = cur.text(src);
+
+    if prev.is_trivia() || cur.is_trivia() {
+        if prev.kind == TokenKind::BlockComment && cur.gap.newlines == 0 {
+            let before = if i >= 2 { tokens[i - 2].text(src) } else { "" };
+            // A comment at statement position is separated from the statement; elsewhere
+            // the author's spacing is kept (`for ( /**/; …)`).
+            if matches!(before, "{" | ";" | "}" | "=>" | ":") {
+                return true;
             }
-            return true;
-        }
-
-        // `(x)+y`, `(x)*y` are ambiguous with casts to pointer/type; ReSharper keeps the
-        // source spacing instead of guessing, so do the same.
-        let ambiguous_after_cast = |idx: usize| {
-            self.tokens.get(idx).is_some_and(|t| {
-                matches!(t.text(self.src), "*" | "+" | "-" | "&" | "^")
-                    && t.ast.operator == OperatorKind::UnaryPrefix
-                    && idx > 0
-                    && self.tokens[idx - 1].text(self.src) == ")"
-                    && self.tokens[idx - 1].ast.paren == ParenKind::Cast
-            })
-        };
-        if ambiguous_after_cast(i) || ambiguous_after_cast(i - 1) {
             return cur.gap.spaces > 0 || cur.gap.tabs > 0;
         }
+        return true;
+    }
 
-        // A numeric literal immediately followed by `.Member` lexes as `100.` + `Member`.
-        if cur.kind == TokenKind::Ident && prev.kind == TokenKind::Number && pt.ends_with('.') {
+    // `(x)+y`, `(x)*y` are ambiguous with casts to pointer/type; ReSharper keeps the
+    // source spacing instead of guessing, so do the same.
+    let ambiguous_after_cast = |idx: usize| {
+        tokens.get(idx).is_some_and(|t| {
+            matches!(t.text(src), "*" | "+" | "-" | "&" | "^")
+                && t.ast.operator == OperatorKind::UnaryPrefix
+                && idx > 0
+                && tokens[idx - 1].text(src) == ")"
+                && tokens[idx - 1].ast.paren == ParenKind::Cast
+        })
+    };
+    if ambiguous_after_cast(i) || ambiguous_after_cast(i - 1) {
+        return cur.gap.spaces > 0 || cur.gap.tabs > 0;
+    }
+
+    // A numeric literal immediately followed by `.Member` lexes as `100.` + `Member`.
+    if cur.kind == TokenKind::Ident && prev.kind == TokenKind::Number && pt.ends_with('.') {
+        return false;
+    }
+
+    // `is { … } ? a : b` parses the `?` as plain punctuation; keep the source space.
+    if ct == "?"
+        && matches!(
+            cur.ast.operator,
+            OperatorKind::None | OperatorKind::Nullable
+        )
+        && pt == "}"
+        && prev.ast.brace == BraceKind::Pattern
+    {
+        return cur.gap.spaces > 0 || cur.gap.tabs > 0;
+    }
+
+    // ReSharper preserves the author's spacing around the range operator `..`.
+    if pt == ".." || ct == ".." {
+        return cur.gap.spaces > 0 || cur.gap.tabs > 0;
+    }
+
+    if ct == "{" {
+        return true;
+    }
+    if pt == "{" {
+        return true;
+    }
+    if ct == "}" {
+        return true;
+    }
+    if pt == "}" {
+        if matches!(ct, "?" | ":") {
+            // Ternary/question and case-label colons are decided by the operator rules below.
+        } else {
+            return !matches!(ct, ";" | "," | ")" | "]" | "." | "?." | "!");
+        }
+    }
+
+    if layout.generic_open[i] || layout.generic_close[i] {
+        return false;
+    }
+    if layout.generic_open[i - 1] {
+        return false;
+    }
+    if layout.generic_close[i - 1] {
+        return !matches!(
+            ct,
+            "(" | ")" | "]" | "[" | "," | ";" | "." | "?." | "?" | "!" | "->"
+        );
+    }
+
+    if matches!(pt, "." | "->" | "::" | "?." | "?[")
+        || matches!(ct, "." | "->" | "::" | "?." | "?[")
+    {
+        return false;
+    }
+
+    if ct == "," {
+        return options.space.before_comma;
+    }
+    if pt == "," {
+        // Multidimensional array ranks keep tight commas when empty (`new int[,]`) but
+        // separate dimension sizes (`new int[7, 5]`).
+        if prev.ast.comma == CommaKind::ArrayRank {
+            return !matches!(ct, "," | "]");
+        }
+        return options.space.after_comma;
+    }
+
+    if pt == ";" {
+        if ct == ";" || ct == ")" {
             return false;
         }
-
-        // `is { … } ? a : b` parses the `?` as plain punctuation; keep the source space.
-        if ct == "?"
-            && matches!(
-                cur.ast.operator,
-                OperatorKind::None | OperatorKind::Nullable
-            )
-            && pt == "}"
-            && prev.ast.brace == BraceKind::Pattern
-        {
-            return cur.gap.spaces > 0 || cur.gap.tabs > 0;
+        if prev.ast.semicolon == SemicolonKind::ForStatement {
+            return options.space.after_semicolon_in_for;
         }
-
-        // ReSharper preserves the author's spacing around the range operator `..`.
-        if pt == ".." || ct == ".." {
-            return cur.gap.spaces > 0 || cur.gap.tabs > 0;
-        }
-
-        if ct == "{" {
-            return true;
-        }
-        if pt == "{" {
-            return true;
-        }
-        if ct == "}" {
-            return true;
-        }
-        if pt == "}" {
-            if matches!(ct, "?" | ":") {
-                // Ternary/question and case-label colons are decided by the operator rules below.
-            } else {
-                return !matches!(ct, ";" | "," | ")" | "]" | "." | "?." | "!");
-            }
-        }
-
-        if self.layout.generic_open[i] || self.layout.generic_close[i] {
+        return true;
+    }
+    if ct == ";" {
+        if pt == "(" || pt == ";" {
             return false;
-        }
-        if self.layout.generic_open[i - 1] {
-            return false;
-        }
-        if self.layout.generic_close[i - 1] {
-            return !matches!(
-                ct,
-                "(" | ")" | "]" | "[" | "," | ";" | "." | "?." | "?" | "!" | "->"
-            );
-        }
-
-        if matches!(pt, "." | "->" | "::" | "?." | "?[")
-            || matches!(ct, "." | "->" | "::" | "?." | "?[")
-        {
-            return false;
-        }
-
-        if ct == "," {
-            return self.options.space.before_comma;
-        }
-        if pt == "," {
-            // Multidimensional array ranks keep tight commas when empty (`new int[,]`) but
-            // separate dimension sizes (`new int[7, 5]`).
-            if prev.ast.comma == CommaKind::ArrayRank {
-                return !matches!(ct, "," | "]");
-            }
-            return self.options.space.after_comma;
-        }
-
-        if pt == ";" {
-            if ct == ";" || ct == ")" {
-                return false;
-            }
-            if prev.ast.semicolon == SemicolonKind::ForStatement {
-                return self.options.space.after_semicolon_in_for;
-            }
-            return true;
-        }
-        if ct == ";" {
-            if pt == "(" || pt == ";" {
-                return false;
-            }
-            if pt == ":" {
-                return colon_after(prev, self.options);
-            }
-            return cur.ast.semicolon == SemicolonKind::ForStatement
-                && self.options.space.before_semicolon_in_for;
-        }
-
-        if ct == ":" {
-            return colon_before(cur, self.options);
         }
         if pt == ":" {
-            return colon_after(prev, self.options);
+            return colon_after(prev, options);
         }
+        return cur.ast.semicolon == SemicolonKind::ForStatement
+            && options.space.before_semicolon_in_for;
+    }
 
-        if pt == "(" {
-            if ct == ")" {
-                return empty_paren_space(prev, self.options);
-            }
-            if prev.ast.paren == ParenKind::Cast {
-                return false;
-            }
-            return self.options.space.between_parentheses;
-        }
-        // `(T)x` — no space between the cast and its operand unless configured.
-        if pt == ")" && prev.ast.paren == ParenKind::Cast {
-            return self.options.space.after_cast;
-        }
+    if ct == ":" {
+        return colon_before(cur, options);
+    }
+    if pt == ":" {
+        return colon_after(prev, options);
+    }
+
+    if pt == "(" {
         if ct == ")" {
-            if pt == "(" {
-                return empty_paren_space(prev, self.options);
-            }
-            return self.options.space.between_parentheses;
+            return empty_paren_space(prev, options);
         }
+        if prev.ast.paren == ParenKind::Cast {
+            return false;
+        }
+        return options.space.between_parentheses;
+    }
+    // `(T)x` — no space between the cast and its operand unless configured.
+    if pt == ")" && prev.ast.paren == ParenKind::Cast {
+        return options.space.after_cast;
+    }
+    if ct == ")" {
+        if pt == "(" {
+            return empty_paren_space(prev, options);
+        }
+        return options.space.between_parentheses;
+    }
 
-        if pt == "[" {
-            if ct == "]" {
-                return self.options.space.between_empty_square_brackets;
-            }
-            return self.options.space.between_square_brackets;
-        }
+    if pt == "[" {
         if ct == "]" {
-            if pt == "[" {
-                return self.options.space.between_empty_square_brackets;
-            }
-            return self.options.space.between_square_brackets;
+            return options.space.between_empty_square_brackets;
         }
-        if ct == "[" {
+        return options.space.between_square_brackets;
+    }
+    if ct == "]" {
+        if pt == "[" {
+            return options.space.between_empty_square_brackets;
+        }
+        return options.space.between_square_brackets;
+    }
+    if ct == "[" {
+        if pt == "new" {
+            return false;
+        }
+        if pt == "]" && prev.ast.bracket == BracketKind::Attribute {
+            return true;
+        }
+        return match cur.ast.bracket {
+            BracketKind::ElementAccess | BracketKind::ArrayRank => false,
+            BracketKind::Attribute => is_word(prev),
+            BracketKind::Other => {
+                // Tree-sitter sometimes parses `T x = [ … ]` as an element binding;
+                // after an expression starter the `[` opens a collection.
+                if matches!(
+                    pt,
+                    "=" | "(" | "," | "return" | "=>" | ":" | "[" | "{" | "?" | "??"
+                ) {
+                    true
+                } else {
+                    is_word(prev)
+                }
+            }
+            BracketKind::CollectionExpression | BracketKind::ListPattern => {
+                pt != "new" && !matches!(pt, "(" | "[" | "{" | "." | "?." | "!" | "~" | "->" | "::")
+            }
+            BracketKind::None => is_word(prev),
+        };
+    }
+
+    if ct == "(" {
+        return paren_space(src, tokens, layout, options, i);
+    }
+
+    if ct == "?" {
+        return match cur.ast.operator {
+            OperatorKind::Ternary => options.space.before_question_in_conditional,
+            OperatorKind::Nullable | OperatorKind::None => false,
+            _ => is_word(prev),
+        };
+    }
+    if pt == "?" {
+        // `x as Key? ?? fallback` keeps the coalescing operator separated.
+        if cur.text(src) == "??" {
+            return true;
+        }
+        return match prev.ast.operator {
+            OperatorKind::Ternary => options.space.after_question_in_conditional,
+            OperatorKind::Nullable | OperatorKind::None => is_word(cur),
+            _ => is_word(cur),
+        };
+    }
+
+    if cur.ast.operator == OperatorKind::Pointer {
+        return false;
+    }
+    if prev.ast.operator == OperatorKind::Pointer {
+        return is_word(cur);
+    }
+
+    if cur.ast.operator == OperatorKind::Range || prev.ast.operator == OperatorKind::Range {
+        return false;
+    }
+
+    if is_prefix_unary(src, tokens, i) {
+        if is_binary_op(src, tokens, i - 1) {
+            return true;
+        }
+        return is_word(prev) || matches!(pt, ")" | "]" | "!");
+    }
+    if is_prefix_unary(src, tokens, i - 1) {
+        return false;
+    }
+    if is_postfix_unary(src, tokens, i) {
+        return false;
+    }
+    if is_postfix_unary(src, tokens, i - 1) {
+        // `i++ == x`: the postfix operator still needs a space before a binary operator.
+        return is_binary_op(src, tokens, i);
+    }
+
+    if pt == "operator" {
+        return true;
+    }
+
+    if is_binary_op(src, tokens, i) || is_binary_op(src, tokens, i - 1) {
+        return match options.space.around_binary_operators {
+            crate::config::AroundBinary::BeforeAndAfter => true,
+            crate::config::AroundBinary::None => false,
+            crate::config::AroundBinary::Ignore => cur.gap.spaces > 0,
+        };
+    }
+
+    if is_word(prev) || is_word(cur) {
+        return true;
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paren_space(
+    src: &str,
+    tokens: &[Token],
+    _layout: &Layout,
+    options: &FormatOptions,
+    i: usize,
+) -> bool {
+    let prev = &tokens[i - 1];
+    let cur = &tokens[i];
+    let pt = prev.text(src);
+    let binary_before = is_binary_op(src, tokens, i - 1);
+
+    if pt == "delegate" {
+        // Anonymous method: `delegate(int x)`, never `delegate (int x)`.
+        return false;
+    }
+    if pt == "new" {
+        // `new (T a, T b)[…]` (tuple type) needs the space; `new()`, `new Foo(…)` and
+        // `new string(…)` do not.
+        return !matches!(cur.ast.paren, ParenKind::ArgumentList);
+    }
+    // A statement/expression directly after a control-flow header keeps a space.
+    if prev.text(src) == ")"
+        && matches!(
+            prev.ast.paren,
+            ParenKind::If
+                | ParenKind::While
+                | ParenKind::For
+                | ParenKind::ForEach
+                | ParenKind::Using
+                | ParenKind::Lock
+                | ParenKind::Fixed
+                | ParenKind::Catch
+                | ParenKind::Switch
+        )
+    {
+        return true;
+    }
+    if i >= 2 && tokens[i - 2].text(src) == "new" {
+        // `new string('a', 3)` — the type name belongs to the creation expression.
+        return false;
+    }
+    if pt == "var" {
+        // `var (a, b) = …` deconstruction declaration.
+        return true;
+    }
+    if pt == "extension" {
+        // C# 14 extension block: `extension(T receiver)`.
+        return false;
+    }
+
+    // Text-based rules for constructs whose AST classification flips between passes
+    // (typically inside already-broken code). They keep formatting idempotent.
+    if prev.kind == TokenKind::Keyword {
+        if matches!(
+            pt,
+            "if" | "while" | "for" | "foreach" | "switch" | "catch" | "using" | "lock" | "fixed"
+        ) {
+            return options.space.after_keywords_in_control_flow;
+        }
+        if matches!(pt, "checked" | "unchecked") {
+            // `checked(expr)` is an expression; the keyword is glued to its operand.
+            return false;
+        }
+        if matches!(
+            pt,
+            "typeof" | "sizeof" | "default" | "nameof" | "this" | "base" | "new"
+        ) {
+            return false;
+        }
+        if matches!(
+            cur.ast.paren,
+            ParenKind::ParameterList | ParenKind::BracketedParameterList
+        ) {
+            return options.space.method_declaration_name_and_open_paren;
+        }
+        if matches!(
+            cur.ast.paren,
+            ParenKind::ArgumentList | ParenKind::AttributeArguments
+        ) {
+            // Contextual keywords used as identifiers (`value()`, `field()`).
+            return options.space.method_call_name_and_open_paren;
+        }
+        return true;
+    }
+    if matches!(cur.ast.paren, ParenKind::None | ParenKind::Other)
+        && matches!(prev.kind, TokenKind::Ident)
+    {
+        return options.space.method_call_name_and_open_paren;
+    }
+
+    match cur.ast.paren {
+        ParenKind::ArgumentList | ParenKind::AttributeArguments => {
             if pt == "new" {
                 return false;
             }
-            if pt == "]" && prev.ast.bracket == BracketKind::Attribute {
-                return true;
-            }
-            return match cur.ast.bracket {
-                BracketKind::ElementAccess | BracketKind::ArrayRank => false,
-                BracketKind::Attribute => is_word(prev),
-                BracketKind::Other => {
-                    // Tree-sitter sometimes parses `T x = [ … ]` as an element binding;
-                    // after an expression starter the `[` opens a collection.
-                    if matches!(
-                        pt,
-                        "=" | "(" | "," | "return" | "=>" | ":" | "[" | "{" | "?" | "??"
-                    ) {
-                        true
-                    } else {
-                        is_word(prev)
-                    }
-                }
-                BracketKind::CollectionExpression | BracketKind::ListPattern => {
-                    pt != "new"
-                        && !matches!(pt, "(" | "[" | "{" | "." | "?." | "!" | "~" | "->" | "::")
-                }
-                BracketKind::None => is_word(prev),
-            };
+            options.space.method_call_name_and_open_paren
         }
-
-        if ct == "(" {
-            return self.paren_space(i);
+        ParenKind::ParameterList | ParenKind::BracketedParameterList => {
+            options.space.method_declaration_name_and_open_paren
         }
-
-        if ct == "?" {
-            return match cur.ast.operator {
-                OperatorKind::Ternary => self.options.space.before_question_in_conditional,
-                OperatorKind::Nullable | OperatorKind::None => false,
-                _ => is_word(prev),
-            };
+        ParenKind::ConstructorInitializer => false,
+        ParenKind::If
+        | ParenKind::While
+        | ParenKind::For
+        | ParenKind::ForEach
+        | ParenKind::Switch
+        | ParenKind::Catch
+        | ParenKind::Using
+        | ParenKind::Lock
+        | ParenKind::Fixed
+        | ParenKind::Checked => options.space.after_keywords_in_control_flow,
+        ParenKind::TypeOf | ParenKind::SizeOf | ParenKind::Default => false,
+        ParenKind::Cast | ParenKind::Parenthesized | ParenKind::Tuple => {
+            // Deliberately ignore `is_word(prev)`: a `(` right after an identifier is a
+            // call/declaration that tree-sitter sometimes mislabels as a cast, and the
+            // difference would make a second formatting pass change the output.
+            binary_before || matches!(pt, "?" | ":" | "??" | "=>")
         }
-        if pt == "?" {
-            // `x as Key? ?? fallback` keeps the coalescing operator separated.
-            if cur.text(self.src) == "??" {
-                return true;
-            }
-            return match prev.ast.operator {
-                OperatorKind::Ternary => self.options.space.after_question_in_conditional,
-                OperatorKind::Nullable | OperatorKind::None => is_word(cur),
-                _ => is_word(cur),
-            };
-        }
-
-        if cur.ast.operator == OperatorKind::Pointer {
-            return false;
-        }
-        if prev.ast.operator == OperatorKind::Pointer {
-            return is_word(cur);
-        }
-
-        if cur.ast.operator == OperatorKind::Range || prev.ast.operator == OperatorKind::Range {
-            return false;
-        }
-
-        if is_prefix_unary(self.src, self.tokens, i) {
-            if is_binary_op(self.src, self.tokens, i - 1) {
-                return true;
-            }
-            return is_word(prev) || matches!(pt, ")" | "]" | "!");
-        }
-        if is_prefix_unary(self.src, self.tokens, i - 1) {
-            return false;
-        }
-        if is_postfix_unary(self.src, self.tokens, i) {
-            return false;
-        }
-        if is_postfix_unary(self.src, self.tokens, i - 1) {
-            // `i++ == x`: the postfix operator still needs a space before a binary operator.
-            return is_binary_op(self.src, self.tokens, i);
-        }
-
-        if pt == "operator" {
-            return true;
-        }
-
-        if is_binary_op(self.src, self.tokens, i) || is_binary_op(self.src, self.tokens, i - 1) {
-            return match self.options.space.around_binary_operators {
-                crate::config::AroundBinary::BeforeAndAfter => true,
-                crate::config::AroundBinary::None => false,
-                crate::config::AroundBinary::Ignore => cur.gap.spaces > 0,
-            };
-        }
-
-        if is_word(prev) || is_word(cur) {
-            return true;
-        }
-        false
-    }
-
-    fn paren_space(&self, i: usize) -> bool {
-        let prev = &self.tokens[i - 1];
-        let cur = &self.tokens[i];
-        let pt = prev.text(self.src);
-        let binary_before = is_binary_op(self.src, self.tokens, i - 1);
-
-        if pt == "delegate" {
-            // Anonymous method: `delegate(int x)`, never `delegate (int x)`.
-            return false;
-        }
-        if pt == "new" {
-            // `new (T a, T b)[…]` (tuple type) needs the space; `new()`, `new Foo(…)` and
-            // `new string(…)` do not.
-            return !matches!(cur.ast.paren, ParenKind::ArgumentList);
-        }
-        // A statement/expression directly after a control-flow header keeps a space.
-        if prev.text(self.src) == ")"
-            && matches!(
-                prev.ast.paren,
-                ParenKind::If
-                    | ParenKind::While
-                    | ParenKind::For
-                    | ParenKind::ForEach
-                    | ParenKind::Using
-                    | ParenKind::Lock
-                    | ParenKind::Fixed
-                    | ParenKind::Catch
-                    | ParenKind::Switch
-            )
-        {
-            return true;
-        }
-        if i >= 2 && self.tokens[i - 2].text(self.src) == "new" {
-            // `new string('a', 3)` — the type name belongs to the creation expression.
-            return false;
-        }
-        if pt == "var" {
-            // `var (a, b) = …` deconstruction declaration.
-            return true;
-        }
-        if pt == "extension" {
-            // C# 14 extension block: `extension(T receiver)`.
-            return false;
-        }
-
-        // Text-based rules for constructs whose AST classification flips between passes
-        // (typically inside already-broken code). They keep formatting idempotent.
-        if prev.kind == TokenKind::Keyword {
-            if matches!(
-                pt,
-                "if" | "while"
-                    | "for"
-                    | "foreach"
-                    | "switch"
-                    | "catch"
-                    | "using"
-                    | "lock"
-                    | "fixed"
-            ) {
-                return self.options.space.after_keywords_in_control_flow;
-            }
-            if matches!(pt, "checked" | "unchecked") {
-                // `checked(expr)` is an expression; the keyword is glued to its operand.
-                return false;
-            }
-            if matches!(
-                pt,
-                "typeof" | "sizeof" | "default" | "nameof" | "this" | "base" | "new"
-            ) {
-                return false;
-            }
-            if matches!(
-                cur.ast.paren,
-                ParenKind::ParameterList | ParenKind::BracketedParameterList
-            ) {
-                return self.options.space.method_declaration_name_and_open_paren;
-            }
-            if matches!(
-                cur.ast.paren,
-                ParenKind::ArgumentList | ParenKind::AttributeArguments
-            ) {
-                // Contextual keywords used as identifiers (`value()`, `field()`).
-                return self.options.space.method_call_name_and_open_paren;
-            }
-            return true;
-        }
-        if matches!(cur.ast.paren, ParenKind::None | ParenKind::Other)
-            && matches!(prev.kind, TokenKind::Ident)
-        {
-            return self.options.space.method_call_name_and_open_paren;
-        }
-
-        match cur.ast.paren {
-            ParenKind::ArgumentList | ParenKind::AttributeArguments => {
-                if pt == "new" {
-                    return false;
-                }
-                self.options.space.method_call_name_and_open_paren
-            }
-            ParenKind::ParameterList | ParenKind::BracketedParameterList => {
-                self.options.space.method_declaration_name_and_open_paren
-            }
-            ParenKind::ConstructorInitializer => false,
-            ParenKind::If
-            | ParenKind::While
-            | ParenKind::For
-            | ParenKind::ForEach
-            | ParenKind::Switch
-            | ParenKind::Catch
-            | ParenKind::Using
-            | ParenKind::Lock
-            | ParenKind::Fixed
-            | ParenKind::Checked => self.options.space.after_keywords_in_control_flow,
-            ParenKind::TypeOf | ParenKind::SizeOf | ParenKind::Default => false,
-            ParenKind::Cast | ParenKind::Parenthesized | ParenKind::Tuple => {
-                // Deliberately ignore `is_word(prev)`: a `(` right after an identifier is a
-                // call/declaration that tree-sitter sometimes mislabels as a cast, and the
-                // difference would make a second formatting pass change the output.
-                binary_before || matches!(pt, "?" | ":" | "??" | "=>")
-            }
-            ParenKind::None | ParenKind::Other => {
-                binary_before || is_word(prev) || matches!(pt, "?" | ":" | "??" | "=>")
-            }
+        ParenKind::None | ParenKind::Other => {
+            binary_before || is_word(prev) || matches!(pt, "?" | ":" | "??" | "=>")
         }
     }
 }

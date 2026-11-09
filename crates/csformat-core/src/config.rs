@@ -236,6 +236,19 @@ impl Default for BlankLineOptions {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WrapStyle {
+    /// Fill lines up to the width limit (`wrap_if_long`, ReSharper's default).
+    #[default]
+    WrapIfLong,
+    /// If the construct does not fit (or already spans lines), put every element on
+    /// its own line (`chop_if_long`).
+    ChopIfLong,
+    /// Always put every element on its own line (`chop_always`).
+    ChopAlways,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WrapOptions {
     /// Master switch. ReSharper's `resharper_wrap_lines`.
@@ -244,6 +257,91 @@ pub struct WrapOptions {
     pub max_length: Option<usize>,
     /// Extra indentation used for wrapped continuation lines.
     pub continuation_indent: usize,
+
+    /// `resharper_csharp_wrap_arguments_style`.
+    pub arguments: WrapStyle,
+    /// `resharper_csharp_wrap_parameters_style`.
+    pub parameters: WrapStyle,
+    /// `resharper_csharp_wrap_primary_constructor_parameters_style`.
+    pub primary_constructor_parameters: WrapStyle,
+    /// `resharper_csharp_wrap_extends_list_style`.
+    pub extends_list: WrapStyle,
+    /// `resharper_csharp_wrap_object_and_collection_initializer_style`.
+    pub object_initializer: WrapStyle,
+    /// `resharper_csharp_wrap_array_initializer_style`.
+    pub array_initializer: WrapStyle,
+    /// `resharper_csharp_wrap_enum_declaration`.
+    pub enum_declaration: WrapStyle,
+    /// `resharper_csharp_wrap_switch_expression`.
+    pub switch_expression: WrapStyle,
+    /// `resharper_csharp_wrap_list_pattern`.
+    pub list_pattern: WrapStyle,
+    /// `resharper_csharp_wrap_property_pattern`.
+    pub property_pattern: WrapStyle,
+    /// `resharper_csharp_wrap_for_stmt_header_style`.
+    pub for_header: WrapStyle,
+    /// `resharper_csharp_wrap_multiple_declaration_style`.
+    pub multiple_declaration: WrapStyle,
+    /// `resharper_csharp_wrap_multiple_type_parameter_constraints_style`.
+    pub multiple_constraints: WrapStyle,
+
+    /// `resharper_csharp_wrap_before_comma`.
+    pub before_comma: bool,
+    /// `resharper_csharp_wrap_before_eq`.
+    pub before_eq: bool,
+    /// `resharper_csharp_wrap_before_binary_opsign`.
+    pub before_binary_opsign: bool,
+    /// `resharper_csharp_wrap_before_ternary_opsigns`.
+    pub before_ternary_opsigns: bool,
+    /// `resharper_csharp_wrap_before_extends_colon`.
+    pub before_extends_colon: bool,
+    /// `resharper_csharp_wrap_before_type_parameter_langle`.
+    pub before_type_parameter_langle: bool,
+    /// `resharper_csharp_wrap_before_first_type_parameter_constraint`.
+    pub before_first_type_parameter_constraint: bool,
+    /// `resharper_csharp_wrap_before_arrow_with_expressions`.
+    pub before_arrow_with_expressions: bool,
+    /// `resharper_csharp_wrap_before_linq_expression`.
+    pub before_linq_expression: bool,
+    /// `resharper_csharp_wrap_after_invocation_lpar`.
+    pub after_invocation_lpar: bool,
+    /// `resharper_csharp_wrap_before_invocation_rpar`.
+    pub before_invocation_rpar: bool,
+    /// `resharper_csharp_wrap_after_declaration_lpar`.
+    pub after_declaration_lpar: bool,
+    /// `resharper_csharp_wrap_before_declaration_rpar`.
+    pub before_declaration_rpar: bool,
+    /// `resharper_csharp_wrap_after_primary_constructor_declaration_lpar`.
+    pub after_primary_constructor_declaration_lpar: bool,
+    /// `resharper_csharp_wrap_before_primary_constructor_declaration_rpar`.
+    pub before_primary_constructor_declaration_rpar: bool,
+    /// `resharper_csharp_wrap_chained_binary_expressions`.
+    pub chained_binary_expressions: bool,
+    /// `resharper_csharp_wrap_chained_binary_patterns`.
+    pub chained_binary_patterns: bool,
+    /// `resharper_csharp_wrap_chained_method_calls`.
+    pub chained_method_calls: bool,
+    /// `resharper_csharp_wrap_after_dot_in_method_calls`.
+    pub after_dot_in_method_calls: bool,
+    /// `resharper_csharp_wrap_before_first_method_call`.
+    pub before_first_method_call: bool,
+    /// `resharper_csharp_wrap_after_property_in_chained_method_calls`.
+    pub after_property_in_chained_method_calls: bool,
+    /// `resharper_csharp_wrap_linq_expressions`.
+    pub linq_expressions: bool,
+
+    /// `resharper_csharp_max_invocation_arguments_on_line` (0 = no limit).
+    pub max_arguments_on_line: Option<usize>,
+    /// `resharper_csharp_max_formal_parameters_on_line`.
+    pub max_formal_parameters_on_line: Option<usize>,
+    /// `resharper_csharp_max_primary_constructor_parameters_on_line`.
+    pub max_primary_constructor_parameters_on_line: Option<usize>,
+    /// `resharper_csharp_max_initializer_elements_on_line`.
+    pub max_initializer_elements_on_line: Option<usize>,
+    /// `resharper_csharp_max_array_initializer_elements_on_line`.
+    pub max_array_initializer_elements_on_line: Option<usize>,
+    /// `resharper_csharp_max_enum_members_on_line`.
+    pub max_enum_members_on_line: Option<usize>,
 }
 
 impl Default for WrapOptions {
@@ -252,6 +350,47 @@ impl Default for WrapOptions {
             enabled: true,
             max_length: Some(120),
             continuation_indent: 1,
+            arguments: WrapStyle::WrapIfLong,
+            parameters: WrapStyle::WrapIfLong,
+            primary_constructor_parameters: WrapStyle::WrapIfLong,
+            extends_list: WrapStyle::WrapIfLong,
+            object_initializer: WrapStyle::WrapIfLong,
+            array_initializer: WrapStyle::WrapIfLong,
+            enum_declaration: WrapStyle::WrapIfLong,
+            switch_expression: WrapStyle::WrapIfLong,
+            list_pattern: WrapStyle::WrapIfLong,
+            property_pattern: WrapStyle::WrapIfLong,
+            for_header: WrapStyle::WrapIfLong,
+            multiple_declaration: WrapStyle::WrapIfLong,
+            multiple_constraints: WrapStyle::WrapIfLong,
+            before_comma: false,
+            before_eq: false,
+            before_binary_opsign: false,
+            before_ternary_opsigns: false,
+            before_extends_colon: false,
+            before_type_parameter_langle: false,
+            before_first_type_parameter_constraint: false,
+            before_arrow_with_expressions: false,
+            before_linq_expression: false,
+            after_invocation_lpar: false,
+            before_invocation_rpar: false,
+            after_declaration_lpar: false,
+            before_declaration_rpar: false,
+            after_primary_constructor_declaration_lpar: false,
+            before_primary_constructor_declaration_rpar: false,
+            chained_binary_expressions: false,
+            chained_binary_patterns: false,
+            chained_method_calls: false,
+            after_dot_in_method_calls: false,
+            before_first_method_call: false,
+            after_property_in_chained_method_calls: false,
+            linq_expressions: false,
+            max_arguments_on_line: None,
+            max_formal_parameters_on_line: None,
+            max_primary_constructor_parameters_on_line: None,
+            max_initializer_elements_on_line: None,
+            max_array_initializer_elements_on_line: None,
+            max_enum_members_on_line: None,
         }
     }
 }
@@ -891,6 +1030,54 @@ fn set_usize(
     }
 }
 
+fn set_max_on_line(
+    slot: &mut Option<usize>,
+    value: &str,
+    key: &str,
+    path: &Path,
+    applied: &mut Vec<AppliedSetting>,
+    warnings: &mut Vec<String>,
+) {
+    match value.trim().parse::<usize>() {
+        Ok(0) => {
+            *slot = None;
+            applied.push(AppliedSetting {
+                source: path.to_path_buf(),
+                key: key.to_owned(),
+                value: value.to_owned(),
+            });
+        }
+        Ok(v) => {
+            *slot = Some(v);
+            applied.push(AppliedSetting {
+                source: path.to_path_buf(),
+                key: key.to_owned(),
+                value: value.to_owned(),
+            });
+        }
+        Err(_) => warnings.push(format!(
+            "{}: invalid integer for {key}: {value:?}",
+            path.display()
+        )),
+    }
+}
+
+fn set_wrap_style(
+    slot: &mut WrapStyle,
+    value: &str,
+    key: &str,
+    path: &Path,
+    applied: &mut Vec<AppliedSetting>,
+    warnings: &mut Vec<String>,
+) {
+    set_enum(slot, value, key, path, applied, warnings, |v| match v {
+        "wrap_if_long" | "simple_wrap" => Some(WrapStyle::WrapIfLong),
+        "chop_if_long" => Some(WrapStyle::ChopIfLong),
+        "chop_always" => Some(WrapStyle::ChopAlways),
+        _ => None,
+    });
+}
+
 fn set_enum<T: Copy>(
     slot: &mut T,
     value: &str,
@@ -927,6 +1114,10 @@ pub fn apply_key(
     // our handlers are C#-specific, so collapse them onto the shared `resharper_` form.
     if let Some(rest) = key.strip_prefix("resharper_csharp_") {
         key = format!("resharper_{rest}");
+    } else if let Some(rest) = key.strip_prefix("csharp_wrap_") {
+        // ReSharper also documents the prefix-less form, e.g.
+        // `csharp_wrap_arguments_style`.
+        key = format!("resharper_wrap_{rest}");
     }
     let value_trim = value.trim();
     let v = value_trim.to_ascii_lowercase();
@@ -1503,8 +1694,336 @@ pub fn apply_key(
                 _ => None,
             },
         ),
-        "resharper_wrap_after_delegates" | "resharper_wrap_chained_method_calls" => {
-            // Accepted for compatibility; wrapping groups are not that fine-grained yet.
+        "resharper_wrap_arguments_style" => set_wrap_style(
+            &mut options.wrap.arguments,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_parameters_style" => set_wrap_style(
+            &mut options.wrap.parameters,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_primary_constructor_parameters_style" => set_wrap_style(
+            &mut options.wrap.primary_constructor_parameters,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_extends_list_style" => set_wrap_style(
+            &mut options.wrap.extends_list,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_object_and_collection_initializer_style" => set_wrap_style(
+            &mut options.wrap.object_initializer,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_array_initializer_style" => set_wrap_style(
+            &mut options.wrap.array_initializer,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_enum_declaration" => set_wrap_style(
+            &mut options.wrap.enum_declaration,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_switch_expression" => set_wrap_style(
+            &mut options.wrap.switch_expression,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_list_pattern" => set_wrap_style(
+            &mut options.wrap.list_pattern,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_property_pattern" => set_wrap_style(
+            &mut options.wrap.property_pattern,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_for_stmt_header_style" => set_wrap_style(
+            &mut options.wrap.for_header,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_multiple_declaration_style" => set_wrap_style(
+            &mut options.wrap.multiple_declaration,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_multiple_type_parameter_constraints_style" => set_wrap_style(
+            &mut options.wrap.multiple_constraints,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_before_comma" => set_bool(
+            &mut options.wrap.before_comma,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_before_eq" => set_bool(
+            &mut options.wrap.before_eq,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_before_binary_opsign" => set_bool(
+            &mut options.wrap.before_binary_opsign,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_before_ternary_opsigns" => set_bool(
+            &mut options.wrap.before_ternary_opsigns,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_before_extends_colon" => set_bool(
+            &mut options.wrap.before_extends_colon,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_before_type_parameter_langle" => set_bool(
+            &mut options.wrap.before_type_parameter_langle,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_before_first_type_parameter_constraint" => set_bool(
+            &mut options.wrap.before_first_type_parameter_constraint,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_before_arrow_with_expressions" => set_bool(
+            &mut options.wrap.before_arrow_with_expressions,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_before_linq_expression" => set_bool(
+            &mut options.wrap.before_linq_expression,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_after_invocation_lpar" => set_bool(
+            &mut options.wrap.after_invocation_lpar,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_before_invocation_rpar" => set_bool(
+            &mut options.wrap.before_invocation_rpar,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_after_declaration_lpar" => set_bool(
+            &mut options.wrap.after_declaration_lpar,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_before_declaration_rpar" => set_bool(
+            &mut options.wrap.before_declaration_rpar,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_after_primary_constructor_declaration_lpar" => set_bool(
+            &mut options.wrap.after_primary_constructor_declaration_lpar,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_before_primary_constructor_declaration_rpar" => set_bool(
+            &mut options.wrap.before_primary_constructor_declaration_rpar,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_chained_binary_expressions" => set_bool(
+            &mut options.wrap.chained_binary_expressions,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_chained_binary_patterns" => set_bool(
+            &mut options.wrap.chained_binary_patterns,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_chained_method_calls" => set_bool(
+            &mut options.wrap.chained_method_calls,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_after_dot_in_method_calls" => set_bool(
+            &mut options.wrap.after_dot_in_method_calls,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_before_first_method_call" => set_bool(
+            &mut options.wrap.before_first_method_call,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_after_property_in_chained_method_calls" => set_bool(
+            &mut options.wrap.after_property_in_chained_method_calls,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_linq_expressions" => set_bool(
+            &mut options.wrap.linq_expressions,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_max_invocation_arguments_on_line" => set_max_on_line(
+            &mut options.wrap.max_arguments_on_line,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_max_formal_parameters_on_line" => set_max_on_line(
+            &mut options.wrap.max_formal_parameters_on_line,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_max_primary_constructor_parameters_on_line" => set_max_on_line(
+            &mut options.wrap.max_primary_constructor_parameters_on_line,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_max_initializer_elements_on_line" => set_max_on_line(
+            &mut options.wrap.max_initializer_elements_on_line,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_max_array_initializer_elements_on_line" => set_max_on_line(
+            &mut options.wrap.max_array_initializer_elements_on_line,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_max_enum_members_on_line" => set_max_on_line(
+            &mut options.wrap.max_enum_members_on_line,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_wrap_after_delegates" => {
+            // Accepted for compatibility; delegates are wrapped with their invocation.
             options.warnings.push(format!(
                 "{key} is accepted but not yet granularly implemented"
             ));
