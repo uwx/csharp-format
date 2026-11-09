@@ -193,15 +193,36 @@ jobs:
             --source https://api.nuget.org/v3/index.json --skip-duplicate
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          # A version tag creates a normal release; pushes to main update a single
-          # rolling "nightly" prerelease so release history stays readable.
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'nightly' }}
-          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Nightly' }}
-          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          generate_release_notes: true
-          files: |
-            artifacts/csharp-format-*.tar.gz
-            nupkg/*.nupkg
-          fail_on_unmatched_files: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_IS_TAG" = "true" ]; then
+            tag="${GITHUB_REF_NAME}"
+            title="${GITHUB_REF_NAME}"
+          else
+            # A version tag creates a normal release; pushes to main update a
+            # single rolling "nightly" prerelease so history stays readable.
+            tag="nightly"
+            title="Nightly"
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag exists; replacing its assets"
+          else
+            args=(--title "$title" --generate-notes)
+            if [ "$REF_IS_TAG" = "true" ]; then
+              args+=(--verify-tag)
+            else
+              args+=(--prerelease --target "$GITHUB_SHA")
+            fi
+            gh release create "$tag" "${args[@]}"
+          fi
+
+          # --clobber replaces each asset in place. The previous
+          # softprops/action-gh-release step deleted and re-uploaded assets and
+          # intermittently lost the delete/upload race ("already_exists").
+          gh release upload "$tag" \
+            artifacts/csharp-format-*.tar.gz nupkg/*.nupkg --clobber
