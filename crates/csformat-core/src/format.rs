@@ -285,11 +285,47 @@ impl Layout {
                         | CommaKind::CollectionExpression
                         | CommaKind::Other
                 );
-            let before_operator =
-                token.ast.operator == OperatorKind::Binary && !is_assignment_operator(ct);
-            let after_assignment = is_assignment_operator(pt);
-            let before_member = matches!(ct, "." | "?." | "->");
-            wrap_candidate[i] = after_comma || before_operator || after_assignment || before_member;
+            let before_operator = options.wrap.before_binary_opsign
+                && token.ast.operator == OperatorKind::Binary
+                && !is_assignment_operator(ct);
+            let after_operator = !options.wrap.before_binary_opsign
+                && prev.ast.operator == OperatorKind::Binary
+                && !is_assignment_operator(pt);
+            let after_assignment = !options.wrap.before_eq && is_assignment_operator(pt);
+            let before_assignment = options.wrap.before_eq && is_assignment_operator(ct);
+            let before_ternary =
+                options.wrap.before_ternary_opsigns && token.ast.operator == OperatorKind::Ternary;
+            let before_arrow = options.wrap.before_arrow_with_expressions && ct == "=>";
+            let before_member =
+                matches!(ct, "." | "?." | "->") && options.wrap.chained_method_calls;
+            let after_dot =
+                options.wrap.after_dot_in_method_calls && matches!(pt, "." | "?." | "->");
+            let before_extends = options.wrap.before_extends_colon
+                && ct == ":"
+                && token.ast.colon == ColonKind::BaseList;
+            let before_constraint =
+                options.wrap.before_first_type_parameter_constraint && ct == "where";
+            let before_langle = options.wrap.before_type_parameter_langle
+                && ct == "<"
+                && token.ast.angle == AngleKind::TypeParameterOpen;
+            let before_linq = options.wrap.before_linq_expression
+                && matches!(
+                    ct,
+                    "from" | "where" | "select" | "orderby" | "group" | "join" | "let"
+                );
+            wrap_candidate[i] = after_comma
+                || before_operator
+                || after_operator
+                || after_assignment
+                || before_assignment
+                || before_ternary
+                || before_arrow
+                || before_member
+                || after_dot
+                || before_extends
+                || before_constraint
+                || before_langle
+                || before_linq;
         }
 
         let mut match_close = vec![usize::MAX; n];
