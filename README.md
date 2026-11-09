@@ -22,8 +22,9 @@ and C# 14 `extension` blocks.
   `*.DotSettings` XML, resolved per file with nearest-wins precedence.
 - **ReSharper Reformat Code parity** — verified against a real
   ReSharper-formatted codebase (see [Status](#status)).
-- **Fast** — a native binary; about 79 ms for an 871-line file, versus 439 ms
-  for CSharpier and 9.4 s for the ReSharper CLI on the same machine.
+- **Fast** — a native binary; about 80 ms for an 871-line file, versus 0.5 s
+  for CSharpier, 1.9 s for `dotnet format whitespace` and 10.3 s for the
+  ReSharper CLI on the same machine (see [BENCHMARK.md](BENCHMARK.md)).
 - **Practical CLI** — format in place, check (exit code for CI), unified diff,
   stdin, resolved-config inspection, and a corpus verification harness.
 - **Safe Rust** — `unsafe_code` is denied workspace-wide; library paths avoid
@@ -195,16 +196,22 @@ diffs it against our formatter.
 ## Performance
 
 Measured on an 871-line NFM-World file (`Mad/Gameplay/RacePhase.cs`), best of
-three runs on the same machine:
+three runs on the same machine. Full matrix (20-file runs, dirty input,
+correctness checks, methodology) in [BENCHMARK.md](BENCHMARK.md).
 
-| Formatter | Wall time |
-| --- | --- |
-| `csharp-format format --stdout` | **79 ms** |
-| `csharpier format` (1.3.0) | 439 ms |
-| ReSharper CLI `jb cleanupcode` (2026.2.4.1) | 9,391 ms |
+| Formatter | 1 file | 20 files (~17k lines) |
+| --- | ---: | ---: |
+| `csharp-format format` | **80 ms** | **117 ms** |
+| `csharpier format` (1.3.0) | 490 ms | 666 ms |
+| `dotnet-fastformat` (1.5.0) | 591 ms | 912 ms |
+| `dotnet format whitespace` | 1,905 ms | 2,086 ms |
+| ReSharper CLI `jb cleanupcode` (2026.2.4.1) | 10,274 ms | 16,140 ms |
 
-The ReSharper and CSharpier figures include .NET tool startup; our binary is
-native.
+All figures are end-to-end command times and include process startup; the .NET
+tools pay a runtime/workspace-load cost before they touch a file, while our
+binary is native. On already-formatted input `csharp-format` reproduces the
+file byte for byte (ReSharper and the Roslyn formatters also leave it alone;
+CSharpier reprints it to its own style).
 
 ## Design invariants
 
