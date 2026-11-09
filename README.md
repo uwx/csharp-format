@@ -259,6 +259,28 @@ CSharpier reprints it to its own style).
 - Files that already contain syntax errors are formatted on a best-effort basis
   and are not treated as failures unless `--strict` is used.
 
+## Publishing
+
+Releases are produced by `.github/workflows/release.yml`. Pushing a `v*` tag
+creates a GitHub release with per-RID tarballs and the `.nupkg` tool packages,
+and publishes those packages to nuget.org when trusted publishing is
+configured. Pushes to `main` produce a rolling nightly release and never
+publish to nuget.org.
+
+Trusted publishing uses short-lived OIDC credentials, so no NuGet API key is
+stored in the repository:
+
+1. On nuget.org, open **Account → Trusted Publishing** and add a policy for
+   this repository with the workflow file `release.yml` (the file name only,
+   not the `.github/workflows/` path). Leave the environment field empty.
+2. In the GitHub repository, add an Actions **variable** (not a secret)
+   `NUGET_USER` containing your nuget.org profile name, not your email
+   address. Without it the NuGet steps are skipped and only GitHub release
+   assets are produced.
+3. Push a `v*` tag. `NuGet/login@v1` exchanges the job's OIDC token for a
+   one-hour API key, which the workflow uses to push the RID packages first
+   and the pointer package last.
+
 ## Contributing
 
 See **[AGENTS.md](AGENTS.md)** for the repository layout, invariants and the
