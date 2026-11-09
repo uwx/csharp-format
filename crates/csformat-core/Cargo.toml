@@ -1,0 +1,19 @@
+[package]
+name = "csformat-core"
+description = "C# source formatter engine: lexer, syntax context, editorconfig resolution, layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+quick-xml = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-c-sharp = { workspace = true }
+unicode-ident = { workspace = true }
+
+[lints]
+workspace = true

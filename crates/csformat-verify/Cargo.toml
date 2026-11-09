@@ -1,0 +1,25 @@
+[package]
+name = "csformat-verify"
+description = "Corpus verification harness for csharp-format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "csformat-verify"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+csformat-core = { path = "../csformat-core" }
+ignore = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-c-sharp = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+# Build output
+/target/
+**/bin/
+**/obj/
+
+# Scratch space used while developing and comparing against ReSharper
+/.tmp/
+/jbtmp/A.cs
+/jbtmp/B.cs
+/jbtmp/orig.cs
+/jbtmp/ref.cs
+/jbtmp/resharped.cs
+
+# Reference corpora are fetched separately (see USAGE.md)
+/corpus/
+
+# Editor / tooling state
+.vs/
+.idea/
+*.user
+*.DotSettings.user
+
+# Member crates must not carry their own lockfile (workspace lock only)
+/crates/*/Cargo.lock
