@@ -91,6 +91,7 @@ def nuspec(
     project_url: str | None,
     repository_url: str | None,
     tags: str | None,
+    readme: bool = False,
 ) -> str:
     extra = ""
     if license:
@@ -99,6 +100,9 @@ def nuspec(
         # (https://aka.ms/invalidNuGetLicenseUrl). The SDK writes the expression
         # into the URL with spaces percent-encoded, so do the same.
         extra += f"    <licenseUrl>{license_url(license)}</licenseUrl>\n"
+    if readme:
+        # Rendered on nuget.org; the file is packed at the package root.
+        extra += "    <readme>README.md</readme>\n"
     if project_url:
         extra += f"    <projectUrl>{xml_escape(project_url)}</projectUrl>\n"
     if repository_url:
@@ -176,6 +180,12 @@ def main(argv: list[str]) -> int:
     packages: list[tuple[str, str]] = []
     written: list[str] = []
 
+    if not os.path.isfile(args.readme):
+        fail(f"readme not found: {args.readme}")
+    with open(args.readme, "rb") as handle:
+        readme_payload = handle.read()
+    readme_files = [("README.md", readme_payload, 0o644)]
+
     seen: set[str] = set()
     for spec in args.binary:
         rid, sep, source = spec.partition("=")
@@ -200,6 +210,7 @@ def main(argv: list[str]) -> int:
             package_type="DotnetToolRidPackage",
             package_id=binary_id,
             version=args.version,
+            readme=True,
             **common_metadata(),
         )
         target = os.path.join(args.out, f"{binary_id}.{args.version}.nupkg")
@@ -210,7 +221,8 @@ def main(argv: list[str]) -> int:
             [
                 (f"tools/net10.0/{rid}/DotnetToolSettings.xml", settings.encode(), 0o644),
                 (f"tools/net10.0/{rid}/{entry}", payload, 0o755),
-            ],
+            ]
+            + readme_files,
             package_id=binary_id,
             version=args.version,
             description=args.description,
@@ -223,6 +235,7 @@ def main(argv: list[str]) -> int:
         package_type="DotnetTool",
         package_id=args.package_id,
         version=args.version,
+        readme=True,
         **common_metadata(),
     )
     pointer = os.path.join(args.out, f"{args.package_id}.{args.version}.nupkg")
@@ -230,7 +243,8 @@ def main(argv: list[str]) -> int:
         pointer,
         f"{args.package_id}.nuspec",
         pointer_nuspec,
-        [("tools/any/any/DotnetToolSettings.xml", pointer_settings.encode(), 0o644)],
+        [("tools/any/any/DotnetToolSettings.xml", pointer_settings.encode(), 0o644)]
+        + readme_files,
         package_id=args.package_id,
         version=args.version,
         description=args.description,
@@ -273,6 +287,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-url", default=None)
     parser.add_argument("--repository-url", default=None)
     parser.add_argument("--tags", default="dotnet tool formatter csharp resharper")
+    parser.add_argument(
+        "--readme",
+        default="packaging/nuget-readme.md",
+        help="Markdown file embedded as README.md and rendered on nuget.org",
+    )
     parser.add_argument(
         "--binary",
         action="append",

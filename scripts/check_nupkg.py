@@ -28,7 +28,8 @@ def main(paths: list[str]) -> int:
     for path in paths:
         try:
             with zipfile.ZipFile(path) as package:
-                names = [name for name in package.namelist() if name.endswith(".nuspec")]
+                entries = package.namelist()
+                names = [name for name in entries if name.endswith(".nuspec")]
                 if len(names) != 1:
                     fail(f"{path}: expected exactly one .nuspec, found {len(names)}")
                 text = package.read(names[0]).decode("utf-8")
@@ -43,6 +44,14 @@ def main(paths: list[str]) -> int:
                     f"{path}: license expression {expression!r} needs "
                     f"<licenseUrl>{expected}</licenseUrl>"
                 )
+
+        if "<readme>" in text:
+            readme = text.split("<readme>", 1)[1].split("<", 1)[0].strip()
+            archived = readme.replace("\\", "/")
+            if archived not in entries:
+                fail(f"{path}: <readme> points at missing file {readme!r}")
+            if not archived.lower().endswith(".md"):
+                fail(f"{path}: readme {readme!r} must be a Markdown file")
 
         if "<id>" not in text or "<version>" not in text:
             fail(f"{path}: nuspec lacks an id or version")

@@ -281,6 +281,10 @@ stored in the repository:
    one-hour API key, which the workflow uses to push the RID packages first
    and the pointer package last.
 
+Every package embeds [packaging/nuget-readme.md](packaging/nuget-readme.md) as
+`README.md`; nuget.org renders it on the package page. That readme is written
+for package consumers (install, usage, guarantees), not for contributors.
+
 ## Contributing
 
 See **[AGENTS.md](AGENTS.md)** for the repository layout, invariants and the

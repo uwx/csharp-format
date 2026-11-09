@@ -49,6 +49,7 @@ Building the packages locally:
 
 ```sh
 python3 scripts/pack_dotnet_tool.py --version 0.1.0 --out dist/nupkg \
+  --readme packaging/nuget-readme.md \
   --binary win-x64=target/release/csharp-format.exe
 ```
 

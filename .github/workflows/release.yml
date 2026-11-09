@@ -146,6 +146,7 @@ jobs:
           python3 scripts/pack_dotnet_tool.py \
             --version "$VERSION" \
             --out nupkg \
+            --readme packaging/nuget-readme.md \
             --project-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --repository-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             "${args[@]}"
