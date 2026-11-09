@@ -152,6 +152,15 @@ jobs:
 
           ls -l nupkg
 
+      - name: Validate package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          # nuget.org rejects a license expression without the matching
+          # licenseUrl (https://aka.ms/invalidNuGetLicenseUrl); catch it here
+          # instead of after the upload.
+          python3 scripts/check_nupkg.py nupkg/*.nupkg
+
       - name: NuGet login (OIDC → temporary API key)
         # Only tagged releases publish; a missing NUGET_USER variable keeps the
         # workflow limited to GitHub release assets.

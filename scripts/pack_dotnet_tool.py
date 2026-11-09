@@ -66,6 +66,11 @@ def core_properties(package_id: str, version: str, description: str) -> str:
 """
 
 
+def license_url(expression: str) -> str:
+    """The licenseUrl nuget.org expects alongside a license expression."""
+    return "https://licenses.nuget.org/" + expression.replace(" ", "%20")
+
+
 def xml_escape(value: str) -> str:
     return (
         value.replace("&", "&amp;")
@@ -90,6 +95,10 @@ def nuspec(
     extra = ""
     if license:
         extra += f"    <license type=\"expression\">{xml_escape(license)}</license>\n"
+        # nuget.org rejects a license expression without the matching licenseUrl
+        # (https://aka.ms/invalidNuGetLicenseUrl). The SDK writes the expression
+        # into the URL with spaces percent-encoded, so do the same.
+        extra += f"    <licenseUrl>{license_url(license)}</licenseUrl>\n"
     if project_url:
         extra += f"    <projectUrl>{xml_escape(project_url)}</projectUrl>\n"
     if repository_url:
