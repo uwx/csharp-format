@@ -614,6 +614,100 @@ impl Default for WrapOptions {
     }
 }
 
+/// ReSharper's `align_*` settings: which continuation lines are aligned under the first
+/// element of their construct instead of indented one level.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlignOptions {
+    pub first_arg_by_paren: bool,
+    pub linq_query: bool,
+    pub multiline_argument: bool,
+    pub multiline_array_and_object_initializer: bool,
+    pub multiline_binary_expressions_chain: bool,
+    pub multiline_binary_patterns: bool,
+    pub multiline_calls_chain: bool,
+    pub multiline_comments: bool,
+    pub multiline_expression: bool,
+    pub multiline_extends_list: bool,
+    pub multiline_for_stmt: bool,
+    pub multiline_list_pattern: bool,
+    pub multiline_parameter: bool,
+    pub multiline_property_pattern: bool,
+    pub multiline_statement_conditions: bool,
+    pub multiline_switch_expression: bool,
+    pub multiple_declaration: bool,
+    pub multiline_type_parameter_constrains: bool,
+    pub multiline_type_parameter_list: bool,
+    pub tuple_components: bool,
+}
+
+impl Default for AlignOptions {
+    fn default() -> Self {
+        Self {
+            first_arg_by_paren: false,
+            linq_query: false,
+            multiline_argument: false,
+            multiline_array_and_object_initializer: false,
+            multiline_binary_expressions_chain: true,
+            multiline_binary_patterns: false,
+            multiline_calls_chain: false,
+            multiline_comments: true,
+            multiline_expression: false,
+            multiline_extends_list: false,
+            multiline_for_stmt: false,
+            multiline_list_pattern: false,
+            multiline_parameter: false,
+            multiline_property_pattern: false,
+            multiline_statement_conditions: true,
+            multiline_switch_expression: false,
+            multiple_declaration: false,
+            multiline_type_parameter_constrains: false,
+            multiline_type_parameter_list: false,
+            tuple_components: false,
+        }
+    }
+}
+
+impl AlignOptions {
+    /// Apply an `align_*` setting by its suffix. Returns `None` when the suffix is not part
+    /// of this family, otherwise whether the value parsed.
+    fn set_resharper(&mut self, suffix: &str, value: &str) -> Option<bool> {
+        let Some(flag) = parse_bool(value) else {
+            return Some(false);
+        };
+        let slot = match suffix {
+            "first_arg_by_paren" => &mut self.first_arg_by_paren,
+            "linq_query" => &mut self.linq_query,
+            "multiline_argument" => &mut self.multiline_argument,
+            "multiline_array_and_object_initializer" => {
+                &mut self.multiline_array_and_object_initializer
+            }
+            "multiline_binary_expressions_chain" => &mut self.multiline_binary_expressions_chain,
+            "multiline_binary_patterns" => &mut self.multiline_binary_patterns,
+            "multiline_calls_chain" => &mut self.multiline_calls_chain,
+            "multiline_comments" => &mut self.multiline_comments,
+            "multiline_expression" => &mut self.multiline_expression,
+            "multiline_extends_list" => &mut self.multiline_extends_list,
+            "multiline_for_stmt" => &mut self.multiline_for_stmt,
+            "multiline_list_pattern" => &mut self.multiline_list_pattern,
+            "multiline_parameter" => &mut self.multiline_parameter,
+            "multiline_property_pattern" => &mut self.multiline_property_pattern,
+            "multiline_statement_conditions" => &mut self.multiline_statement_conditions,
+            "multiline_switch_expression" => &mut self.multiline_switch_expression,
+            "multiple_declaration" => &mut self.multiple_declaration,
+            "multline_type_parameter_constrains" | "multiline_type_parameter_constrains" => {
+                &mut self.multiline_type_parameter_constrains
+            }
+            "multline_type_parameter_list" | "multiline_type_parameter_list" => {
+                &mut self.multiline_type_parameter_list
+            }
+            "tuple_components" => &mut self.tuple_components,
+            _ => return None,
+        };
+        *slot = flag;
+        Some(true)
+    }
+}
+
 /// ReSharper's `indent_*` / `outdent_*` / `continuous_indent_*` settings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndentOptions {
@@ -790,6 +884,7 @@ pub struct FormatOptions {
     pub space: SpaceOptions,
     pub blank_lines: BlankLineOptions,
     pub indent: IndentOptions,
+    pub align: AlignOptions,
     pub wrap: WrapOptions,
     pub preserve_single_line_blocks: bool,
     pub preserve_single_line_statements: bool,
@@ -821,6 +916,7 @@ impl Default for FormatOptions {
             space: SpaceOptions::default(),
             blank_lines: BlankLineOptions::default(),
             indent: IndentOptions::default(),
+            align: AlignOptions::default(),
             wrap: WrapOptions::default(),
             preserve_single_line_blocks: true,
             preserve_single_line_statements: true,
@@ -1509,6 +1605,21 @@ pub fn apply_key(
             value: value_trim.to_owned(),
         });
     };
+
+    if let Some(rest) = key.strip_prefix("resharper_align_") {
+        match options.align.set_resharper(rest, value_trim) {
+            Some(true) => push(&key),
+            Some(false) => options.warnings.push(format!(
+                "{}: invalid value for {key}: {value_trim:?}",
+                path.display()
+            )),
+            None => options.warnings.push(format!(
+                "{}: unsupported align option {key}",
+                path.display()
+            )),
+        }
+        return;
+    }
 
     if let Some(rest) = key
         .strip_prefix("resharper_indent_")

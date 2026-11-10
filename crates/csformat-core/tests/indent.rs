@@ -143,3 +143,36 @@ fn continuous_indent_multiplier_scales_continuations() {
         "class C\n{\n    void M()\n    {\n        Foo(Bar(Baz(1,\n                2)));\n    }\n}\n",
     );
 }
+
+#[test]
+fn binary_chains_align_at_the_expression_start() {
+    let source = "class C\n{\n    int M()\n    {\n        var v = 1\n            + 2\n            + 3;\n    }\n}\n";
+    let expected = "class C\n{\n    int M()\n    {\n        var v = 1\n                + 2\n                + 3;\n    }\n}\n";
+    check(source, &[], expected);
+    check(
+        source,
+        &["align_multiline_binary_expressions_chain = false"],
+        "class C\n{\n    int M()\n    {\n        var v = 1\n            + 2\n            + 3;\n    }\n}\n",
+    );
+    check(
+        source,
+        &["outdent_binary_ops = true"],
+        "class C\n{\n    int M()\n    {\n        var v = 1\n              + 2\n              + 3;\n    }\n}\n",
+    );
+}
+
+#[test]
+fn call_chains_align_when_asked() {
+    let source = "class C\n{\n    int M(int a)\n    {\n        var w = a\n            .ToString()\n            .Length;\n    }\n}\n";
+    check(source, &[], source);
+    check(
+        source,
+        &["align_multiline_calls_chain = true"],
+        "class C\n{\n    int M(int a)\n    {\n        var w = a\n                .ToString()\n                .Length;\n    }\n}\n",
+    );
+    check(
+        source,
+        &["outdent_dots = true"],
+        "class C\n{\n    int M(int a)\n    {\n        var w = a\n           .ToString()\n           .Length;\n    }\n}\n",
+    );
+}

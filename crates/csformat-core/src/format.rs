@@ -556,6 +556,11 @@ struct Emitter<'a> {
     /// Indent column of every statement that started a line, keyed by its start byte, so a
     /// nested (brace-less) statement can indent relative to its parent statement.
     stmt_indent: std::collections::HashMap<usize, i32>,
+    /// Column where the expression of a statement starts, for alignment of continuation
+    /// lines; keyed by the statement's start byte.
+    expr_align: std::collections::HashMap<usize, i32>,
+    /// Statement whose expression starts at the next emitted token (`=`, `return`, `=>`).
+    pending_align: Option<usize>,
     /// Visual column of the current line's indentation.
     cur_line_column: i32,
     /// Indent of the line that opened the most recently closed `(`/`]`.
@@ -638,6 +643,8 @@ impl<'a> Emitter<'a> {
             line_len: 0,
             cur_line_indent: 0,
             stmt_indent: std::collections::HashMap::new(),
+            expr_align: std::collections::HashMap::new(),
+            pending_align: None,
             cur_line_column: 0,
             last_closed_paren_indent: None,
             preserved_line: false,
@@ -691,6 +698,17 @@ impl<'a> Emitter<'a> {
             None
         };
 
+        if newlines == 0 {
+            if let Some(owner) = self.pending_align.take() {
+                let space = i > 0 && !self.at_line_start && self.should_space(i);
+                let column =
+                    i32::try_from(self.line_len).unwrap_or(i32::MAX) + if space { 1 } else { 0 };
+                self.expr_align.insert(owner, column);
+            }
+        } else {
+            self.pending_align = None;
+        }
+
         if i > 0 {
             if newlines > 0 {
                 for _ in 0..newlines {
@@ -731,6 +749,12 @@ impl<'a> Emitter<'a> {
                     self.stmt_indent.insert(token.start, code_column);
                 }
             }
+        }
+
+        if matches!(text, "=" | "=>" | "return" | "throw")
+            && token.ast.stmt_owner_start != usize::MAX
+        {
+            self.pending_align = Some(token.ast.stmt_owner_start);
         }
 
         let raw = token.text(self.src);
@@ -1090,6 +1114,13 @@ impl<'a> Emitter<'a> {
         }
 
         let mut indent = base;
+        // Continuation lines of a binary chain, a call chain or a broken list may align
+        // under the expression start (`align_multiline_*`, `outdent_*`).
+        if newlines > 0
+            && let Some(column) = self.aligned_continuation(i, base, unit)
+        {
+            return column;
+        }
         let paren_inner = match (self.paren_stack.last(), self.stack.last()) {
             (Some(paren), Some(frame)) => paren.seq > frame.seq,
             (Some(_), None) => true,
@@ -1257,6 +1288,54 @@ impl<'a> Emitter<'a> {
             indent = self.last_code_indent;
         }
         indent
+    }
+
+    /// Column of a continuation line that starts with a binary operator, a member-access
+    /// dot or a list comma, when ReSharper aligns or outdents it instead of indenting it.
+    fn aligned_continuation(&self, i: usize, base: i32, unit: i32) -> Option<i32> {
+        let token = &self.tokens[i];
+        if self.layout.inside_inline[i] {
+            return None;
+        }
+        let text = token.text(self.src);
+        let options = &self.options.align;
+        let owner = token.ast.stmt_owner_start;
+        let expr = self.expr_align.get(&owner).copied();
+        let stmt = self.stmt_indent.get(&owner).copied().unwrap_or(base);
+        if token.ast.operator == OperatorKind::Binary {
+            let column = if options.multiline_binary_expressions_chain {
+                expr?
+            } else {
+                stmt + self.wrap_columns()
+            };
+            return Some(if self.options.indent.outdent_binary_ops {
+                column - i32::try_from(text.chars().count() + 1).unwrap_or(1)
+            } else {
+                column
+            });
+        }
+        if matches!(text, "." | "?.") {
+            let column = if options.multiline_calls_chain {
+                expr?
+            } else {
+                stmt + self.wrap_columns()
+            };
+            return Some(if self.options.indent.outdent_dots {
+                column - 1
+            } else {
+                column
+            });
+        }
+        if text == "," && self.options.indent.outdent_commas {
+            // A comma that starts a line moves left so the following element lines up with
+            // the list content.
+            let column = match self.paren_stack.last() {
+                Some(paren) => paren.indent + unit,
+                None => stmt + self.wrap_columns(),
+            };
+            return Some(column - 2);
+        }
+        None
     }
 
     /// Whether token `i` starts a statement of the same kind as its enclosing statement,
@@ -1475,6 +1554,13 @@ impl<'a> Emitter<'a> {
         }
         if token.text(self.src) == "where" && !self.options.indent.type_constraints {
             // `indent_type_constraints = false` overrides the author's column.
+            return None;
+        }
+        if self
+            .aligned_continuation(i, self.last_code_indent, self.indent_unit_columns())
+            .is_some()
+        {
+            // Aligned/outdented continuations are computed, not preserved.
             return None;
         }
         if token.ast.in_query {
