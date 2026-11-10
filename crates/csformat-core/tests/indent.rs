@@ -226,3 +226,45 @@ fn aligned_base_lists_line_up_under_the_first_entry() {
 ",
     );
 }
+
+#[test]
+fn tabular_alignment_of_fields_and_variables() {
+    let source = "class C\n{\n    int a = 1;\n    int bb = 2;\n    string ccc = \"x\";\n\n    void M()\n    {\n        int x = 1;\n        int yyyy = 2;\n    }\n}\n";
+    check(source, &[], source);
+    check(
+        source,
+        &["int_align_fields = true"],
+        "class C\n{\n    int    a   = 1;\n    int    bb  = 2;\n    string ccc = \"x\";\n\n    void M()\n    {\n        int x = 1;\n        int yyyy = 2;\n    }\n}\n",
+    );
+    check(
+        source,
+        &["int_align_variables = true"],
+        "class C\n{\n    int a = 1;\n    int bb = 2;\n    string ccc = \"x\";\n\n    void M()\n    {\n        int x    = 1;\n        int yyyy = 2;\n    }\n}\n",
+    );
+}
+
+#[test]
+fn tabular_alignment_of_assignments_and_binary_expressions() {
+    let source = "class C\n{\n    void M()\n    {\n        a = 3;\n        bb = 4;\n        var v = 1 + 2;\n        var wwww = 3 + 4;\n    }\n}\n";
+    check(source, &[], source);
+    check(
+        source,
+        &["int_align_assignments = true"],
+        "class C\n{\n    void M()\n    {\n        a  = 3;\n        bb = 4;\n        var v = 1 + 2;\n        var wwww = 3 + 4;\n    }\n}\n",
+    );
+    check(
+        source,
+        &["int_align_binary_expressions = true"],
+        "class C\n{\n    void M()\n    {\n        a = 3;\n        bb = 4;\n        var v = 1    + 2;\n        var wwww = 3 + 4;\n    }\n}\n",
+    );
+}
+
+#[test]
+fn tabular_alignment_of_properties() {
+    let source = "class C\n{\n    int P1 { get; set; }\n    int PPPP { get; set; }\n}\n";
+    check(
+        source,
+        &["int_align_properties = true"],
+        "class C\n{\n    int P1   { get; set; }\n    int PPPP { get; set; }\n}\n",
+    );
+}

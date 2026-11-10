@@ -614,6 +614,73 @@ impl Default for WrapOptions {
     }
 }
 
+/// ReSharper's `int_align_*` settings: tabular alignment of adjacent lines (the "Align
+/// Code" feature applied during reformatting).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntAlignOptions {
+    pub assignments: bool,
+    pub binary_expressions: bool,
+    pub comments: bool,
+    pub fields: bool,
+    pub fix_in_adjacent: bool,
+    pub invocations: bool,
+    pub methods: bool,
+    pub nested_ternary: bool,
+    pub parameters: bool,
+    pub properties: bool,
+    pub property_patterns: bool,
+    pub switch_expressions: bool,
+    pub switch_sections: bool,
+    pub variables: bool,
+}
+
+impl IntAlignOptions {
+    /// Apply an `int_align_*` setting by its suffix. Returns `None` when the suffix is not
+    /// part of this family, otherwise whether the value parsed.
+    fn set_resharper(&mut self, suffix: &str, value: &str) -> Option<bool> {
+        let Some(flag) = parse_bool(value) else {
+            return Some(false);
+        };
+        let slot = match suffix {
+            "assignments" => &mut self.assignments,
+            "binary_expressions" => &mut self.binary_expressions,
+            "comments" => &mut self.comments,
+            "fields" => &mut self.fields,
+            "fix_in_adjacent" => &mut self.fix_in_adjacent,
+            "invocations" => &mut self.invocations,
+            "methods" => &mut self.methods,
+            "nested_ternary" => &mut self.nested_ternary,
+            "parameters" => &mut self.parameters,
+            "properties" => &mut self.properties,
+            "property_patterns" => &mut self.property_patterns,
+            "switch_expressions" => &mut self.switch_expressions,
+            "switch_sections" => &mut self.switch_sections,
+            "variables" => &mut self.variables,
+            _ => return None,
+        };
+        *slot = flag;
+        Some(true)
+    }
+
+    /// Whether any alignment kind is enabled.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.assignments
+            || self.binary_expressions
+            || self.comments
+            || self.fields
+            || self.invocations
+            || self.methods
+            || self.nested_ternary
+            || self.parameters
+            || self.properties
+            || self.property_patterns
+            || self.switch_expressions
+            || self.switch_sections
+            || self.variables
+    }
+}
+
 /// ReSharper's `align_*` settings: which continuation lines are aligned under the first
 /// element of their construct instead of indented one level.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -885,6 +952,7 @@ pub struct FormatOptions {
     pub blank_lines: BlankLineOptions,
     pub indent: IndentOptions,
     pub align: AlignOptions,
+    pub int_align: IntAlignOptions,
     pub wrap: WrapOptions,
     pub preserve_single_line_blocks: bool,
     pub preserve_single_line_statements: bool,
@@ -917,6 +985,7 @@ impl Default for FormatOptions {
             blank_lines: BlankLineOptions::default(),
             indent: IndentOptions::default(),
             align: AlignOptions::default(),
+            int_align: IntAlignOptions::default(),
             wrap: WrapOptions::default(),
             preserve_single_line_blocks: true,
             preserve_single_line_statements: true,
@@ -1605,6 +1674,21 @@ pub fn apply_key(
             value: value_trim.to_owned(),
         });
     };
+
+    if let Some(rest) = key.strip_prefix("resharper_int_align_") {
+        match options.int_align.set_resharper(rest, value_trim) {
+            Some(true) => push(&key),
+            Some(false) => options.warnings.push(format!(
+                "{}: invalid value for {key}: {value_trim:?}",
+                path.display()
+            )),
+            None => options.warnings.push(format!(
+                "{}: unsupported alignment option {key}",
+                path.display()
+            )),
+        }
+        return;
+    }
 
     if let Some(rest) = key.strip_prefix("resharper_align_") {
         match options.align.set_resharper(rest, value_trim) {

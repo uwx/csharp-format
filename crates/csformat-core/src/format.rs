@@ -594,6 +594,27 @@ struct Emitter<'a> {
     base_colon_break: Vec<bool>,
     /// For each declaration start, whether its declarators are chopped one per line.
     decl_chop: Vec<Option<bool>>,
+    /// Extra spaces to insert before a token for tabular alignment (`int_align_*`).
+    align_pad: Vec<i32>,
+}
+
+/// Kinds of tabular alignment slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    /// The `{` of a property declaration.
+    Brace,
+    /// The `=` of an assignment.
+    Assignment,
+    /// The first binary operator of a line.
+    Binary,
+}
+
+/// One line taking part in tabular alignment: its line number, the construct it belongs
+/// to, and the `(token, column)` pairs to line up.
+struct AlignItem {
+    line: u32,
+    block: usize,
+    slots: Vec<(usize, i32)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -665,10 +686,226 @@ impl<'a> Emitter<'a> {
             base_chop: vec![None; tokens.len()],
             base_colon_break: vec![false; tokens.len()],
             decl_chop: vec![None; tokens.len()],
+            align_pad: vec![0; tokens.len()],
+        }
+    }
+
+    /// ReSharper's tabular alignment (`int_align_*`): extra spaces before tokens so that
+    /// the slots of adjacent lines line up. A no-op unless configured.
+    fn compute_alignment(&mut self) {
+        if !self.options.int_align.any() {
+            return;
+        }
+        let mut items: Vec<AlignItem> = Vec::new();
+        for i in 0..self.tokens.len() {
+            let token = &self.tokens[i];
+            if token.is_trivia() {
+                continue;
+            }
+            if i > 0 && token.gap.newlines == 0 {
+                continue;
+            }
+            let align = &self.options.int_align;
+            if align.fields && token.ast.decl_start == DeclKind::Field {
+                if let Some(item) = self.declaration_align_item(i) {
+                    items.push(item);
+                }
+            }
+            if align.variables && token.ast.stmt_start == StmtKind::LocalDeclaration {
+                if let Some(item) = self.declaration_align_item(i) {
+                    items.push(item);
+                }
+            }
+            if align.properties
+                && matches!(
+                    token.ast.decl_start,
+                    DeclKind::Property | DeclKind::AutoProperty
+                )
+                && let Some(item) = self.single_slot_item(i, Slot::Brace)
+            {
+                items.push(item);
+            }
+            if align.assignments
+                && token.ast.stmt_start == StmtKind::Expression
+                && let Some(item) = self.single_slot_item(i, Slot::Assignment)
+            {
+                items.push(item);
+            }
+            if align.binary_expressions
+                && let Some(item) = self.single_slot_item(i, Slot::Binary)
+            {
+                items.push(item);
+            }
+        }
+        self.apply_alignment(items);
+    }
+
+    /// Alignment slots of a field or local declaration that starts at `i`: the declared
+    /// name and the `=`. Declarations that do not fit on one line are skipped.
+    fn declaration_align_item(&self, i: usize) -> Option<AlignItem> {
+        let line = self.tokens[i].line;
+        let mut end = i;
+        let mut name = None;
+        let mut equals = None;
+        let mut depth = 0i32;
+        while end < self.tokens.len() {
+            let token = &self.tokens[end];
+            if end > i && token.line != line {
+                return None;
+            }
+            let text = token.text(self.src);
+            match text {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => depth -= 1,
+                ";" | "," if depth <= 0 => break,
+                "=" if depth <= 0 && equals.is_none() => equals = Some(end),
+                _ => {
+                    if depth <= 0 && token.kind == TokenKind::Ident && equals.is_none() {
+                        name = Some(end);
+                    }
+                }
+            }
+            end += 1;
+        }
+        let name = name?;
+        let columns = self.line_columns(i, end);
+        let mut slots = Vec::new();
+        for (token_index, column) in columns {
+            if token_index == name || Some(token_index) == equals {
+                slots.push((token_index, column));
+            }
+        }
+        Some(AlignItem {
+            line,
+            block: self.layout.enclosing_open[i],
+            slots,
+        })
+    }
+
+    /// Alignment slot `slot` of the first line of the construct starting at `i`.
+    fn single_slot_item(&self, i: usize, slot: Slot) -> Option<AlignItem> {
+        let line = self.tokens[i].line;
+        let mut end = i;
+        let mut target = None;
+        let mut depth = 0i32;
+        while end < self.tokens.len() {
+            let token = &self.tokens[end];
+            if end > i && token.line != line {
+                return None;
+            }
+            let text = token.text(self.src);
+            match text {
+                "(" | "[" => depth += 1,
+                ")" | "]" => depth -= 1,
+                _ => {}
+            }
+            if target.is_none() {
+                match slot {
+                    Slot::Brace => {
+                        if text == "{" {
+                            target = Some(end);
+                        }
+                    }
+                    Slot::Assignment => {
+                        if text == "=" && depth == 0 && token.ast.operator != OperatorKind::None {
+                            target = Some(end);
+                        }
+                    }
+                    Slot::Binary => {
+                        // Assignments are not binary expressions for ReSharper.
+                        let assigned = matches!(
+                            text,
+                            "=" | "+="
+                                | "-="
+                                | "*="
+                                | "/="
+                                | "%="
+                                | "&="
+                                | "|="
+                                | "^="
+                                | "<<="
+                                | ">>="
+                                | "??="
+                        );
+                        if token.ast.operator == OperatorKind::Binary && !assigned {
+                            target = Some(end);
+                        }
+                    }
+                }
+            }
+            if end > i && matches!(text, ";" | "{" | "}") {
+                break;
+            }
+            end += 1;
+        }
+        let target = target?;
+        let column = self
+            .line_columns(i, target + 1)
+            .into_iter()
+            .find(|(index, _)| *index == target)
+            .map(|(_, column)| column)?;
+        Some(AlignItem {
+            line,
+            block: self.layout.enclosing_open[i],
+            slots: vec![(target, column)],
+        })
+    }
+
+    /// Column (relative to the line start) of every token in `from..to`.
+    fn line_columns(&self, from: usize, to: usize) -> Vec<(usize, i32)> {
+        let mut columns = Vec::with_capacity(to.saturating_sub(from));
+        let mut column: i32 = 0;
+        for j in from..to {
+            if j > from && self.layout.space_before[j] {
+                column += 1;
+            }
+            columns.push((j, column));
+            column +=
+                i32::try_from(self.tokens[j].text(self.src).chars().count()).unwrap_or(i32::MAX);
+        }
+        columns
+    }
+
+    /// Pad the slots of runs of adjacent lines so that they line up.
+    fn apply_alignment(&mut self, mut items: Vec<AlignItem>) {
+        items.sort_by_key(|item| (item.block, item.line));
+        let mut start = 0;
+        while start < items.len() {
+            let mut end = start + 1;
+            while end < items.len()
+                && items[end].block == items[start].block
+                && items[end].line == items[end - 1].line + 1
+                && items[end].slots.len() == items[start].slots.len()
+            {
+                end += 1;
+            }
+            if end - start >= 2 {
+                // Each slot is aligned after the pads of the earlier slots, so the padding
+                // accumulates within the line.
+                let count = end - start;
+                let mut cumulative = vec![0i32; count];
+                for slot in 0..items[start].slots.len() {
+                    let target = (0..count)
+                        .map(|index| items[start + index].slots[slot].1 + cumulative[index])
+                        .max()
+                        .unwrap_or(0);
+                    for index in 0..count {
+                        let (token, column) = items[start + index].slots[slot];
+                        let column = column + cumulative[index];
+                        let pad = target - column;
+                        if pad > 0 {
+                            self.align_pad[token] += pad;
+                            cumulative[index] += pad;
+                        }
+                    }
+                }
+            }
+            start = end;
         }
     }
 
     fn run(&mut self) {
+        self.compute_alignment();
         for i in 0..self.tokens.len() {
             self.emit_token(i);
         }
@@ -729,7 +966,12 @@ impl<'a> Emitter<'a> {
                 self.at_line_start = true;
             } else if !self.at_line_start {
                 let space = self.should_space(i);
-                if space {
+                let pad = self.align_pad.get(i).copied().unwrap_or(0);
+                if space || pad > 0 {
+                    self.out.push(' ');
+                    self.line_len += 1;
+                }
+                for _ in 0..pad {
                     self.out.push(' ');
                     self.line_len += 1;
                 }
