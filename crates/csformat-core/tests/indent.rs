@@ -176,3 +176,32 @@ fn call_chains_align_when_asked() {
         "class C\n{\n    int M(int a)\n    {\n        var w = a\n           .ToString()\n           .Length;\n    }\n}\n",
     );
 }
+
+#[test]
+fn broken_for_headers_align_under_the_first_token() {
+    let source = "class C
+{
+    void M()
+    {
+        for (var i = 0;
+            i < 1;
+            i++)
+        {
+        }
+    }
+}
+";
+    let expected = "class C
+{
+    void M()
+    {
+        for (var i = 0;
+             i < 1;
+             i++)
+        {
+        }
+    }
+}
+";
+    check(source, &[], expected);
+}

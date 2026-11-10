@@ -1563,6 +1563,14 @@ impl<'a> Emitter<'a> {
             // Aligned/outdented continuations are computed, not preserved.
             return None;
         }
+        if self
+            .paren_stack
+            .last()
+            .is_some_and(|paren| paren.kind == ParenKind::For)
+        {
+            // A broken `for` header aligns under its first token; recompute it.
+            return None;
+        }
         if token.ast.in_query {
             // LINQ clauses are indented from the statement, not from `from`.
             return None;
