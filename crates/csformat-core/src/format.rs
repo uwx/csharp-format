@@ -2015,7 +2015,7 @@ fn binary_operator_space(options: &FormatOptions, operator: &str) -> Option<bool
         "&" | "|" | "^" => "around_bitwise_op",
         "&&" | "||" => "around_logical_op",
         "??" => "around_nullcoalescing_op",
-        "=>" => "around_arrow_op",
+        "=>" => "around_lambda_arrow",
         _ if is_assignment_operator(operator) => "around_assignment_op",
         _ => return None,
     };
@@ -2095,6 +2095,113 @@ fn within_bracket_space(options: &FormatOptions, kind: BracketKind, default: boo
     rsharp_space(options, key, default)
 }
 
+/// Space after a prefix unary operator (`!x`, `-x`, `&x`, `*x`, `++x`).
+fn unary_after_space(options: &FormatOptions, operator: &str) -> bool {
+    let fallback = rsharp_space(options, "after_unary_operator", false);
+    let key = match operator {
+        "!" => "after_logical_not_op",
+        "-" => "after_unary_minus_op",
+        "+" => "after_unary_plus_op",
+        "&" => "after_ampersand_op",
+        "*" => "after_asterik_op",
+        "++" | "--" => return rsharp_space(options, "near_postfix_and_prefix_op", fallback),
+        _ => return fallback,
+    };
+    rsharp_space(options, key, fallback)
+}
+
+/// `using X = Y;` uses its own spacing preference for the `=`.
+fn alias_eq_before(src: &str, tokens: &[Token], eq: usize) -> bool {
+    eq >= 2 && tokens[eq - 2].text(src) == "using"
+}
+
+fn is_accessor_keyword(text: &str) -> bool {
+    matches!(text, "get" | "set" | "init" | "add" | "remove")
+}
+
+fn in_accessor_list(layout: &Layout, tokens: &[Token], i: usize) -> bool {
+    let open = layout.enclosing_open[i];
+    open != usize::MAX && tokens[open].ast.brace == BraceKind::AccessorList
+}
+
+/// Space between a brace and the token on the other side of it.
+fn brace_space_inside(
+    tokens: &[Token],
+    layout: &Layout,
+    options: &FormatOptions,
+    open: usize,
+) -> bool {
+    let close = layout.brace_match[open];
+    let empty = close != usize::MAX
+        && (close == open + 1 || tokens[open + 1..close].iter().all(Token::is_trivia));
+    if empty {
+        return rsharp_space(options, "within_empty_braces", true);
+    }
+    let key = match (tokens[open].ast.brace, tokens[open].ast.brace_owner) {
+        (BraceKind::AccessorList, _) | (_, BraceOwner::Accessor) => "in_singleline_accessorholder",
+        (_, BraceOwner::Lambda | BraceOwner::AnonymousMethod) => "in_singleline_anonymous_method",
+        (
+            _,
+            BraceOwner::Method
+            | BraceOwner::Constructor
+            | BraceOwner::Destructor
+            | BraceOwner::Operator
+            | BraceOwner::LocalFunction,
+        ) => "in_singleline_method",
+        (
+            BraceKind::Initializer
+            | BraceKind::Pattern
+            | BraceKind::SwitchExpression
+            | BraceKind::Other
+            | BraceKind::None,
+            _,
+        )
+        | (_, BraceOwner::AnonymousType | BraceOwner::Initializer) => {
+            "within_single_line_array_initializer_braces"
+        }
+        _ => return true,
+    };
+    rsharp_space(options, key, true)
+}
+
+/// Space between a keyword and a parenthesized tuple/expression that follows it.
+fn keyword_paren_space(
+    src: &str,
+    tokens: &[Token],
+    layout: &Layout,
+    options: &FormatOptions,
+    i: usize,
+) -> bool {
+    let keyword = tokens[i - 1].text(src);
+    if matches!(
+        keyword,
+        "as" | "public"
+            | "private"
+            | "protected"
+            | "internal"
+            | "static"
+            | "virtual"
+            | "override"
+            | "abstract"
+            | "sealed"
+            | "extern"
+            | "unsafe"
+            | "readonly"
+            | "volatile"
+            | "partial"
+            | "async"
+            | "const"
+    ) {
+        return rsharp_space(options, "between_keyword_and_type", true);
+    }
+    // `ref (int, int) x` declares a tuple type; `return (1, 2)` yields a tuple value.
+    let close = layout.match_close[i];
+    if close != usize::MAX && close + 1 < tokens.len() && is_word(&tokens[close + 1]) {
+        return rsharp_space(options, "between_keyword_and_type", true);
+    }
+    rsharp_space(options, "between_keyword_and_expression", true)
+}
+
 fn space_between(
     src: &str,
     tokens: &[Token],
@@ -2108,6 +2215,9 @@ fn space_between(
     let ct = cur.text(src);
 
     if prev.is_trivia() || cur.is_trivia() {
+        if cur.kind == TokenKind::LineComment && cur.gap.newlines == 0 {
+            return rsharp_space(options, "before_trailing_comment", true);
+        }
         if prev.kind == TokenKind::BlockComment && cur.gap.newlines == 0 {
             let before = if i >= 2 { tokens[i - 2].text(src) } else { "" };
             // A comment at statement position is separated from the statement; elsewhere
@@ -2152,38 +2262,85 @@ fn space_between(
         return cur.gap.spaces > 0 || cur.gap.tabs > 0;
     }
 
-    // ReSharper preserves the author's spacing around the range operator `..`.
-    if pt == ".." || ct == ".." {
+    // `..` keeps the author's spacing except inside a list pattern, which has its own
+    // preference (`within_slice_pattern`).
+    if pt == ".." {
+        let open = layout.enclosing_open[i - 1];
+        if open != usize::MAX && tokens[open].ast.bracket == BracketKind::ListPattern {
+            return rsharp_space(options, "within_slice_pattern", true);
+        }
+        return cur.gap.spaces > 0 || cur.gap.tabs > 0;
+    }
+    if ct == ".." {
         return cur.gap.spaces > 0 || cur.gap.tabs > 0;
     }
 
     if ct == "{" {
+        if cur.ast.brace == BraceKind::AccessorList {
+            return rsharp_space(options, "before_singleline_accessorholder", true);
+        }
+        if pt == "=>" {
+            // `x => { … }`: the brace inherits the lambda arrow's spacing.
+            return binary_operator_space(options, pt).unwrap_or(true);
+        }
         return true;
     }
     if pt == "{" {
-        return true;
+        return brace_space_inside(tokens, layout, options, i - 1);
     }
     if ct == "}" {
+        let open = layout.brace_match[i];
+        if open != usize::MAX {
+            return brace_space_inside(tokens, layout, options, open);
+        }
         return true;
+    }
+    if pt == ";" && is_accessor_keyword(ct) && in_accessor_list(layout, tokens, i) {
+        return rsharp_space(options, "between_accessors_in_singleline_property", true);
     }
     if pt == "}" {
         if matches!(ct, "?" | ":") {
             // Ternary/question and case-label colons are decided by the operator rules below.
+        } else if is_accessor_keyword(ct) && in_accessor_list(layout, tokens, i) {
+            return rsharp_space(options, "between_accessors_in_singleline_property", true);
+        } else if ct == ";" {
+            return rsharp_space(options, "before_semicolon", false);
         } else {
-            return !matches!(ct, ";" | "," | ")" | "]" | "." | "?." | "!");
+            return !matches!(ct, "," | ")" | "]" | "." | "?." | "!");
         }
     }
 
-    if layout.generic_open[i] || layout.generic_close[i] {
-        return false;
+    if layout.generic_open[i] {
+        let key = if tokens[i].ast.angle == AngleKind::TypeParameterOpen {
+            "before_type_parameter_angle"
+        } else {
+            "before_type_argument_angle"
+        };
+        return rsharp_space(options, key, false);
+    }
+    if layout.generic_close[i] {
+        let key = if tokens[i].ast.angle == AngleKind::TypeParameterClose {
+            "within_type_parameter_angles"
+        } else {
+            "within_type_argument_angles"
+        };
+        return rsharp_space(options, key, false);
     }
     if layout.generic_open[i - 1] {
-        return false;
+        let key = if tokens[i - 1].ast.angle == AngleKind::TypeParameterOpen {
+            "within_type_parameter_angles"
+        } else {
+            "within_type_argument_angles"
+        };
+        return rsharp_space(options, key, false);
     }
     if layout.generic_close[i - 1] {
+        if ct == ";" {
+            return rsharp_space(options, "before_semicolon", false);
+        }
         return !matches!(
             ct,
-            "(" | ")" | "]" | "[" | "," | ";" | "." | "?." | "?" | "!" | "->"
+            "(" | ")" | "]" | "[" | "," | "." | "?." | "?" | "!" | "->"
         );
     }
 
@@ -2193,7 +2350,14 @@ fn space_between(
         if pt == "." || ct == "." {
             return rsharp_space(options, "around_dot", false);
         }
+        if pt == "->" || ct == "->" {
+            return rsharp_space(options, "around_arrow_op", false);
+        }
         return false;
+    }
+
+    if (ct == "=" || pt == "=") && alias_eq_before(src, tokens, if ct == "=" { i } else { i - 1 }) {
+        return rsharp_space(options, "around_alias_eq", true);
     }
 
     if ct == "," {
@@ -2215,6 +2379,9 @@ fn space_between(
         if prev.ast.semicolon == SemicolonKind::ForStatement {
             return options.space.after_semicolon_in_for;
         }
+        if is_accessor_keyword(ct) && in_accessor_list(layout, tokens, i) {
+            return rsharp_space(options, "between_accessors_in_singleline_property", true);
+        }
         return true;
     }
     if ct == ";" {
@@ -2224,8 +2391,10 @@ fn space_between(
         if pt == ":" {
             return colon_after(prev, options);
         }
-        return cur.ast.semicolon == SemicolonKind::ForStatement
-            && options.space.before_semicolon_in_for;
+        if cur.ast.semicolon == SemicolonKind::ForStatement {
+            return options.space.before_semicolon_in_for;
+        }
+        return rsharp_space(options, "before_semicolon", false);
     }
 
     if ct == ":" {
@@ -2242,6 +2411,12 @@ fn space_between(
         if prev.ast.paren == ParenKind::Cast {
             return rsharp_space(options, "between_typecast_parentheses", false);
         }
+        if i >= 2 && tokens[i - 2].text(src) == "nameof" {
+            return rsharp_space(options, "within_nameof_parentheses", false);
+        }
+        if i >= 2 && tokens[i - 2].text(src) == "new" {
+            return rsharp_space(options, "within_new_parentheses", false);
+        }
         let kind = prev.ast.paren;
         return within_paren_space(options, kind, paren_within_default(options, kind));
     }
@@ -2249,11 +2424,29 @@ fn space_between(
     if pt == ")" && prev.ast.paren == ParenKind::Cast {
         return options.space.after_cast;
     }
+    // `(int, int)Method2()` — a cast is glued to the operand that follows it. A return-type
+    // tuple in a declaration keeps its space because no expression starter precedes it.
+    if pt == ")"
+        && cur.kind == TokenKind::Ident
+        && tokens.get(i + 1).is_some_and(|t| t.text(src) == "(")
+        && paren_is_cast_like(src, tokens, layout, i - 1)
+    {
+        return options.space.after_cast;
+    }
     if ct == ")" {
         if pt == "(" {
             return empty_paren_space(prev, options);
         }
         let open = layout.enclosing_open[i];
+        if open != usize::MAX && open > 0 {
+            let before_open = tokens[open - 1].text(src);
+            if before_open == "nameof" {
+                return rsharp_space(options, "within_nameof_parentheses", false);
+            }
+            if before_open == "new" {
+                return rsharp_space(options, "within_new_parentheses", false);
+            }
+        }
         let kind = if open != usize::MAX {
             tokens[open].ast.paren
         } else {
@@ -2288,6 +2481,14 @@ fn space_between(
             BracketKind::None
         };
         return within_bracket_space(options, kind, options.space.between_square_brackets);
+    }
+    if pt == "]" && prev.ast.bracket == BracketKind::Attribute {
+        if cur.ast.bracket == BracketKind::Attribute {
+            return rsharp_space(options, "between_attribute_sections", true);
+        }
+        if !matches!(ct, "," | ")" | "]" | ";" | "." | "?." | "(") {
+            return rsharp_space(options, "after_attributes", true);
+        }
     }
     if ct == "[" {
         if pt == "new" {
@@ -2355,7 +2556,7 @@ fn space_between(
     }
 
     if cur.ast.operator == OperatorKind::Pointer {
-        return false;
+        return rsharp_space(options, "before_pointer_asterik_declaration", false);
     }
     if prev.ast.operator == OperatorKind::Pointer {
         return is_word(cur);
@@ -2372,10 +2573,10 @@ fn space_between(
         return is_word(prev) || matches!(pt, ")" | "]" | "!");
     }
     if is_prefix_unary(src, tokens, i - 1) {
-        return false;
+        return unary_after_space(options, pt);
     }
     if is_postfix_unary(src, tokens, i) {
-        return false;
+        return rsharp_space(options, "near_postfix_and_prefix_op", false);
     }
     if is_postfix_unary(src, tokens, i - 1) {
         // `i++ == x`: the postfix operator still needs a space before a binary operator.
@@ -2383,7 +2584,7 @@ fn space_between(
     }
 
     if pt == "operator" {
-        return true;
+        return rsharp_space(options, "after_operator_keyword", true);
     }
 
     if is_binary_op(src, tokens, i) || is_binary_op(src, tokens, i - 1) {
@@ -2408,7 +2609,7 @@ fn space_between(
 fn paren_space(
     src: &str,
     tokens: &[Token],
-    _layout: &Layout,
+    layout: &Layout,
     options: &FormatOptions,
     i: usize,
 ) -> bool {
@@ -2421,10 +2622,16 @@ fn paren_space(
         // Anonymous method: `delegate(int x)`, never `delegate (int x)`.
         return false;
     }
+    if pt == "nameof" {
+        return rsharp_space(options, "before_nameof_parentheses", false);
+    }
     if pt == "new" {
-        // `new (T a, T b)[…]` (tuple type) needs the space; `new()`, `new Foo(…)` and
-        // `new string(…)` do not.
-        return !matches!(cur.ast.paren, ParenKind::ArgumentList);
+        // `new (T a, T b)[…]` (tuple type) needs the space; target-typed `new()` has its
+        // own preference; `new Foo(…)` and `new string(…)` do not.
+        if cur.ast.paren == ParenKind::ArgumentList {
+            return rsharp_space(options, "before_new_parentheses", false);
+        }
+        return true;
     }
     // A statement/expression directly after a control-flow header keeps a space.
     if prev.text(src) == ")"
@@ -2469,9 +2676,17 @@ fn paren_space(
             // `checked(expr)` is an expression; the keyword is glued to its operand.
             return false;
         }
+        // `return (a, b)`, `throw (new T())`, `is (1, 2)`, `ref (int, int) x`: the keyword
+        // and its operand/type follow the two `between_keyword_and_*` preferences.
         if matches!(
             pt,
-            "typeof" | "sizeof" | "default" | "nameof" | "this" | "base" | "new"
+            "return" | "throw" | "is" | "case" | "await" | "out" | "in" | "ref" | "yield"
+        ) {
+            return keyword_paren_space(src, tokens, layout, options, i);
+        }
+        if matches!(
+            pt,
+            "typeof" | "sizeof" | "default" | "this" | "base" | "new"
         ) {
             return false;
         }
@@ -2549,15 +2764,69 @@ fn paren_space(
             before_paren_space(options, cur.ast.paren, false)
         }
         ParenKind::Cast | ParenKind::Parenthesized | ParenKind::Tuple => {
+            if prev.kind == TokenKind::Keyword {
+                return keyword_paren_space(src, tokens, layout, options, i);
+            }
             // Deliberately ignore `is_word(prev)`: a `(` right after an identifier is a
             // call/declaration that tree-sitter sometimes mislabels as a cast, and the
             // difference would make a second formatting pass change the output.
             binary_before || matches!(pt, "?" | ":" | "??" | "=>")
         }
         ParenKind::None | ParenKind::Other => {
+            if prev.kind == TokenKind::Keyword {
+                return keyword_paren_space(src, tokens, layout, options, i);
+            }
             binary_before || is_word(prev) || matches!(pt, "?" | ":" | "??" | "=>")
         }
     }
+}
+
+/// Whether the `(` or `)` at `index` delimit a cast. Tree-sitter mislabels casts as
+/// parenthesised expressions or parameter lists depending on the surrounding code, so a
+/// parenthesised type in expression position is treated as one.
+fn paren_is_cast_like(src: &str, tokens: &[Token], layout: &Layout, index: usize) -> bool {
+    let open = if tokens[index].text(src) == ")" {
+        layout.enclosing_open[index]
+    } else {
+        index
+    };
+    if open == usize::MAX || open == 0 {
+        return false;
+    }
+    if tokens[open].ast.paren == ParenKind::Cast {
+        return true;
+    }
+    if !matches!(
+        tokens[open].ast.paren,
+        ParenKind::None | ParenKind::Other | ParenKind::ParameterList | ParenKind::ArgumentList
+    ) {
+        return false;
+    }
+    matches!(
+        tokens[open - 1].text(src),
+        "=" | "("
+            | "["
+            | ","
+            | "return"
+            | "throw"
+            | "=>"
+            | "??"
+            | "?"
+            | ":"
+            | "&&"
+            | "||"
+            | "+"
+            | "-"
+            | "*"
+            | "/"
+            | "%"
+            | "!"
+            | "is"
+            | "case"
+            | "out"
+            | "ref"
+            | "in"
+    )
 }
 
 fn is_word(token: &Token) -> bool {
@@ -2593,7 +2862,10 @@ fn colon_before(token: &Token, options: &FormatOptions) -> bool {
         ),
         ColonKind::SwitchLabel => rsharp_space(options, "before_colon_in_case", false),
         ColonKind::AttributeTarget => rsharp_space(options, "before_attribute_colon", false),
-        ColonKind::Constraint | ColonKind::ConstructorInitializer => true,
+        ColonKind::Constraint => {
+            rsharp_space(options, "before_type_parameter_constraint_colon", true)
+        }
+        ColonKind::ConstructorInitializer => true,
         ColonKind::NamedArgument | ColonKind::Label | ColonKind::Pattern => false,
         ColonKind::None | ColonKind::Other => false,
     }
@@ -2609,10 +2881,10 @@ fn colon_after(token: &Token, options: &FormatOptions) -> bool {
         ),
         ColonKind::SwitchLabel => rsharp_space(options, "after_colon_in_case", true),
         ColonKind::AttributeTarget => rsharp_space(options, "after_attribute_colon", true),
-        ColonKind::Constraint
-        | ColonKind::NamedArgument
-        | ColonKind::Pattern
-        | ColonKind::ConstructorInitializer => true,
+        ColonKind::Constraint => {
+            rsharp_space(options, "after_type_parameter_constraint_colon", true)
+        }
+        ColonKind::NamedArgument | ColonKind::Pattern | ColonKind::ConstructorInitializer => true,
         ColonKind::Label => true,
         ColonKind::None | ColonKind::Other => true,
     }
