@@ -268,3 +268,27 @@ fn tabular_alignment_of_properties() {
         "class C\n{\n    int P1   { get; set; }\n    int PPPP { get; set; }\n}\n",
     );
 }
+
+#[test]
+fn per_category_brace_placement() {
+    let source =
+        "namespace N\n{\n    class C\n    {\n        void M()\n        {\n        }\n    }\n}\n";
+    check(
+        source,
+        &["invocable_declaration_braces = end_of_line"],
+        "namespace N\n{\n    class C\n    {\n        void M() {\n        }\n    }\n}\n",
+    );
+    check(
+        source,
+        &["type_declaration_braces = end_of_line"],
+        "namespace N {\n    class C {\n        void M()\n        {\n        }\n    }\n}\n",
+    );
+    check(
+        source,
+        &[
+            "type_declaration_braces = end_of_line",
+            "invocable_declaration_braces = next_line",
+        ],
+        "namespace N {\n    class C {\n        void M()\n        {\n        }\n    }\n}\n",
+    );
+}

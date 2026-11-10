@@ -138,6 +138,12 @@ impl BraceCategories {
     }
 
     #[must_use]
+    pub fn without(mut self, category: BraceCategory) -> Self {
+        self.0 &= !category.bit();
+        self
+    }
+
+    #[must_use]
     pub fn is_all(self) -> bool {
         self.0 == Self::ALL.0
     }
@@ -2241,6 +2247,38 @@ pub fn apply_key(
                 &mut options.warnings,
             );
             options.space.max_attribute_length_for_same_line = n;
+        }
+        // Per-category brace placement (`brace_style` family).
+        "resharper_invocable_declaration_braces"
+        | "resharper_type_declaration_braces"
+        | "resharper_accessor_declaration_braces"
+        | "resharper_anonymous_method_declaration_braces"
+        | "resharper_initializer_braces"
+        | "resharper_other_braces" => {
+            let category = match key.as_str() {
+                "resharper_invocable_declaration_braces" => BraceCategory::Methods,
+                "resharper_type_declaration_braces" => BraceCategory::Types,
+                "resharper_accessor_declaration_braces" => BraceCategory::Accessors,
+                "resharper_anonymous_method_declaration_braces" => BraceCategory::AnonymousMethods,
+                "resharper_initializer_braces" => BraceCategory::Initializers,
+                _ => BraceCategory::Control,
+            };
+            match v.as_str() {
+                "next_line" | "allman" => {
+                    options.newline.before_open_brace =
+                        options.newline.before_open_brace.with(category);
+                    push(&key);
+                }
+                "end_of_line" | "k_r" | "kr" | "same_line" => {
+                    options.newline.before_open_brace =
+                        options.newline.before_open_brace.without(category);
+                    push(&key);
+                }
+                _ => options.warnings.push(format!(
+                    "{}: invalid value for {key}: {value_trim:?}",
+                    path.display()
+                )),
+            }
         }
         "resharper_brace_style" => set_enum(
             &mut options.newline.before_open_brace,
