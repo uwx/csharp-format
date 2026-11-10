@@ -561,6 +561,10 @@ struct Emitter<'a> {
     expr_align: std::collections::HashMap<usize, i32>,
     /// Statement whose expression starts at the next emitted token (`=`, `return`, `=>`).
     pending_align: Option<usize>,
+    /// Column of the first entry of a base list, keyed by its colon's token index.
+    base_align: std::collections::HashMap<usize, i32>,
+    /// Base-list colon whose first entry starts at the next emitted token.
+    pending_base: Option<usize>,
     /// Visual column of the current line's indentation.
     cur_line_column: i32,
     /// Indent of the line that opened the most recently closed `(`/`]`.
@@ -645,6 +649,8 @@ impl<'a> Emitter<'a> {
             stmt_indent: std::collections::HashMap::new(),
             expr_align: std::collections::HashMap::new(),
             pending_align: None,
+            base_align: std::collections::HashMap::new(),
+            pending_base: None,
             cur_line_column: 0,
             last_closed_paren_indent: None,
             preserved_line: false,
@@ -699,6 +705,12 @@ impl<'a> Emitter<'a> {
         };
 
         if newlines == 0 {
+            if let Some(colon) = self.pending_base.take() {
+                let space = i > 0 && !self.at_line_start && self.should_space(i);
+                let column =
+                    i32::try_from(self.line_len).unwrap_or(i32::MAX) + if space { 1 } else { 0 };
+                self.base_align.insert(colon, column);
+            }
             if let Some(owner) = self.pending_align.take() {
                 let space = i > 0 && !self.at_line_start && self.should_space(i);
                 let column =
@@ -751,6 +763,9 @@ impl<'a> Emitter<'a> {
             }
         }
 
+        if text == ":" && token.ast.colon == ColonKind::BaseList {
+            self.pending_base = Some(i);
+        }
         if matches!(text, "=" | "=>" | "return" | "throw")
             && token.ast.stmt_owner_start != usize::MAX
         {
@@ -1279,7 +1294,10 @@ impl<'a> Emitter<'a> {
             // deeper than the colon.
             let owner = self.layout.base_owner[i];
             if owner != usize::MAX && owner != i && self.base_colon_break[owner] {
-                indent += self.wrap_columns();
+                match self.base_align.get(&owner) {
+                    Some(&column) if self.options.align.multiline_extends_list => indent = column,
+                    _ => indent += self.wrap_columns(),
+                }
             }
         }
         if newlines > 0 && self.is_continuation(i) && self.directive_between_previous_code(i) {
@@ -1562,6 +1580,13 @@ impl<'a> Emitter<'a> {
         {
             // Aligned/outdented continuations are computed, not preserved.
             return None;
+        }
+        if self.options.align.multiline_extends_list {
+            let owner = self.layout.base_owner[i];
+            if owner != usize::MAX && owner != i && self.base_colon_break[owner] {
+                // An aligned base list is recomputed from its first entry.
+                return None;
+            }
         }
         if self
             .paren_stack

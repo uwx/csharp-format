@@ -205,3 +205,24 @@ fn broken_for_headers_align_under_the_first_token() {
 ";
     check(source, &[], expected);
 }
+
+#[test]
+fn aligned_base_lists_line_up_under_the_first_entry() {
+    let source = "class D
+    : A,
+        B
+{
+}
+";
+    check(source, &[], source);
+    check(
+        source,
+        &["align_multiline_extends_list = true"],
+        "class D
+    : A,
+      B
+{
+}
+",
+    );
+}
