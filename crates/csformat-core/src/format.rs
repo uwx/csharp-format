@@ -1627,8 +1627,10 @@ impl<'a> Emitter<'a> {
             && !matches!(token.text(self.src), "{" | "}")
         {
             let frame = self.paren_stack.last();
-            // ReSharper aligns a broken `for` header with the first token after the `(`.
-            if frame.is_some_and(|frame| frame.kind == ParenKind::For) {
+            // ReSharper aligns a broken `for` header and a chopped compound condition with
+            // the first token after the `(`.
+            if frame.is_some_and(|frame| frame.kind == ParenKind::For) || self.force_chop_operand(i)
+            {
                 return frame.map_or(base, |frame| frame.content_column);
             }
             // Lines inside a broken argument/parameter list indent one level past the line
@@ -2941,10 +2943,14 @@ impl<'a> Emitter<'a> {
         if open == usize::MAX || self.tokens[open].text(self.src) != "(" {
             return false;
         }
+        // `do ... while` shares the `while` paren kind; the keyword carries the flag.
+        let is_do = self
+            .prev_code(open)
+            .is_some_and(|keyword| self.tokens[keyword].ast.do_statement);
         let enabled = match self.tokens[open].ast.paren {
             ParenKind::If => wrap.force_chop_compound_if,
-            // `do ... while` shares the `while` paren kind.
-            ParenKind::While => wrap.force_chop_compound_while || wrap.force_chop_compound_do,
+            ParenKind::While if is_do => wrap.force_chop_compound_do,
+            ParenKind::While => wrap.force_chop_compound_while,
             _ => false,
         };
         if !enabled {
@@ -2964,7 +2970,7 @@ impl<'a> Emitter<'a> {
                 _ => {}
             }
         }
-        operands >= 2
+        operands >= 1
     }
 
     fn group_break(&self, i: usize) -> bool {

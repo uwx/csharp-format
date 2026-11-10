@@ -264,25 +264,44 @@ Roslyn (`csharp_*`):
 - `csharp_max_attribute_length_for_same_line`
 - `dotnet_sort_system_directives_first`, `dotnet_separate_import_directive_groups`
 
-ReSharper (`resharper_*`):
+ReSharper (`resharper_*`, or `resharper_csharp_*`; the families below are
+complete):
 
-- `resharper_brace_style` (`next_line`/`allman`, `end_of_line`/`k_r`/`kr`/`none`)
-- `resharper_continuation_indent_size`, `resharper_max_line_length`,
-  `resharper_wrap_lines`
-- `resharper_blank_lines_between_members`,
-  `resharper_blank_lines_around_region`,
-  `resharper_blank_lines_after_region`,
-  `resharper_blank_lines_before_endregion`
-- `resharper_keep_blank_lines_in_code`,
-  `resharper_keep_blank_lines_in_declarations`
-- `resharper_max_attribute_length_for_same_line`
+- Braces: `brace_style`, `invocable_declaration_braces`,
+  `type_declaration_braces`, `accessor_declaration_braces`,
+  `accessor_owner_declaration_braces`, `anonymous_method_declaration_braces`,
+  `case_block_braces`, `initializer_braces`, `other_braces`
+- Wrapping: `wrap_*` (per-construct styles, before/after booleans, per-line
+  element limits), `continuation_indent_size`, `max_line_length`, `wrap_lines`
+- Indentation: `indent_*`, `outdent_*`, `continuous_indent_*`,
+  `use_continuous_*`, `indent_preprocessor_*`, `indent_raw_literal_string`
+- Alignment: `align_multiline_*`, `int_align_*`
+- Blank lines: `blank_lines_*`, `min_blank_lines_*`, `keep_blank_lines_*`,
+  `max_*`, `max_attribute_length_for_same_line`
+- Spacing: `space_*` (granular overrides on top of the `csharp_space_*` keys)
+- Placement: `place_*` (single-line bodies and accessors, attribute placement,
+  type constraints, constructor initializers), `allow_comment_after_lbrace`
+- Arrangement: `keep_existing_*_arrangement`
+- Other layout: `stick_comment`, `special_else_if_treatment`,
+  `force_chop_compound_{if,while,do}_expression`, `tab_width`,
+  `insert_final_newline`, `trim_trailing_whitespace`, `end_of_line`
 
-Keys in the ReSharper whitespace family (`resharper_space_*`,
-`resharper_new_line_*`, `resharper_indent_*`, `resharper_wrap_*`,
-`resharper_align_*`, `resharper_blank_lines_*`, `resharper_min_blank_lines_*`,
-`resharper_keep_blank_lines_*`, `resharper_max_*`) that do not have a dedicated
-handler are still parsed and are reported with `-v` as “accepted but not yet
-granularly implemented” instead of being treated as unknown.
+Keys without a dedicated handler are still accepted and reported with `-v`
+instead of being treated as unknown.
+
+Three groups are deliberately not implemented:
+
+- Settings that would add or remove tokens, which a whitespace-only formatter
+  must not do: `braces_for_*`, `braces_redundant`,
+  `trailing_comma_in_multiline_lists`, `trailing_comma_in_singleline_lists`.
+- Code-style settings that never change whitespace: `arguments_*`,
+  `builtin_type_*`, `modifiers_order`, `parentheses_*`, `prefer_*`,
+  `qualify_*`, `*_body` style keys, and similar.
+- Keys that do not apply to a full-file C# pass: `keep_user_linebreaks` and
+  `empty_block_style` (C++ variants), `use_indent_from_previous_element`
+  (partial formatting only), `alignment_tab_fill_style` and
+  `allow_far_alignment` (alignment nuances that only matter in extreme or
+  tab-indented layouts).
 
 ### ReSharper aliases
 

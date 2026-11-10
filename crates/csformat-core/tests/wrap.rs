@@ -440,3 +440,64 @@ fn force_chop_compound_conditions_break_every_operand() {
     let expected = "class C\n{\n    void M(int a)\n    {\n        if (a > 0 &&\n            a < 10 &&\n            a != 5)\n        {\n            M(a);\n        }\n    }\n}\n";
     assert_eq!(format(source, &options), expected);
 }
+
+#[test]
+fn compound_chop_is_per_statement_and_aligns_with_the_condition() {
+    let source = "class C
+{
+    void M(int a)
+    {
+        while (a > 0 && a < 10)
+        {
+            a--;
+        }
+        do
+        {
+            a++;
+        }
+        while (a > 0 && a < 10);
+    }
+}
+";
+    let mut while_options = options();
+    while_options.wrap.force_chop_compound_while = true;
+    let while_chopped = "class C
+{
+    void M(int a)
+    {
+        while (a > 0 &&
+               a < 10)
+        {
+            a--;
+        }
+
+        do
+        {
+            a++;
+        } while (a > 0 && a < 10);
+    }
+}
+";
+    assert_eq!(format(source, &while_options), while_chopped);
+
+    let mut do_options = options();
+    do_options.wrap.force_chop_compound_do = true;
+    let do_chopped = "class C
+{
+    void M(int a)
+    {
+        while (a > 0 && a < 10)
+        {
+            a--;
+        }
+
+        do
+        {
+            a++;
+        } while (a > 0 &&
+                 a < 10);
+    }
+}
+";
+    assert_eq!(format(source, &do_options), do_chopped);
+}
