@@ -176,6 +176,8 @@ pub struct AstInfo {
     pub stmt_parent: StmtKind,
     /// Start byte of that enclosing statement.
     pub stmt_parent_start: usize,
+    /// Whether the token belongs to a LINQ query expression.
+    pub in_query: bool,
     /// Whether that statement spans several source lines.
     pub stmt_start_multiline: bool,
     /// Whether that statement (or a nested unbraced body) owns a block.
@@ -543,6 +545,7 @@ impl Syntax {
         let mut stmt_start = StmtKind::None;
         let mut stmt_parent = StmtKind::None;
         let mut stmt_parent_start = 0usize;
+        let mut in_query = false;
         let mut stmt_start_multiline = false;
         let mut stmt_start_has_block = false;
         let mut stmt_start_control = 0u8;
@@ -566,6 +569,9 @@ impl Syntax {
             }
             if let Some(flag) = flag_for_kind(kind) {
                 info.flags |= flag;
+            }
+            if kind == "query_expression" {
+                in_query = true;
             }
             if kind == "arrow_expression_clause" {
                 info.flags |= flags::EXPRESSION_BODIED;
@@ -701,6 +707,7 @@ impl Syntax {
         info.stmt_start = stmt_start;
         info.stmt_parent = stmt_parent;
         info.stmt_parent_start = stmt_parent_start;
+        info.in_query = in_query;
         info.stmt_start_multiline = stmt_start_multiline;
         info.stmt_start_has_block = stmt_start_has_block;
         info.stmt_end = stmt_end;

@@ -6,7 +6,7 @@
 //! comments, directives and literals) is preserved exactly.
 
 use crate::config::{
-    BraceCategory, EndOfLine, FormatOptions, IndentUnit, SpecialIndent, WrapStyle,
+    AlignIndentStyle, BraceCategory, EndOfLine, FormatOptions, IndentUnit, SpecialIndent, WrapStyle,
 };
 use crate::lexer::{Token, TokenKind, lex};
 use crate::syntax::{
@@ -805,6 +805,9 @@ impl<'a> Emitter<'a> {
     /// The closing delimiter defines how much indentation is stripped from the value, so
     /// shifting every line by the same amount preserves the string exactly.
     fn reindent_raw_string(&self, text: &str) -> String {
+        if self.options.indent.raw_literal_string == AlignIndentStyle::DoNotChange {
+            return text.to_string();
+        }
         let mut prefix = 0;
         let bytes = text.as_bytes();
         while prefix < bytes.len() && bytes[prefix] == b'$' {
@@ -822,7 +825,14 @@ impl<'a> Emitter<'a> {
             return text.to_string();
         }
         let old_indent = tail.chars().count() - closing.chars().count();
-        let target = self.line_len + prefix;
+        // `align` puts the content under the opening quotes; `indent` puts it one level
+        // past the statement.
+        let target = match self.options.indent.raw_literal_string {
+            AlignIndentStyle::Indent => {
+                usize::try_from(self.last_code_indent + self.indent_unit_columns()).unwrap_or(0)
+            }
+            _ => self.line_len + prefix,
+        };
         let pad = self.indent_columns(target);
 
         let mut out = String::with_capacity(text.len() + 16);
@@ -1098,7 +1108,11 @@ impl<'a> Emitter<'a> {
             // Lines inside a broken argument/parameter list indent one level past the line
             // that opened the delimiter, not past the enclosing block.
             let open = frame.map_or(base, |frame| frame.indent);
-            return open + unit;
+            let step = unit
+                * i32::try_from(self.options.indent.continuous_indent_multiplier)
+                    .unwrap_or(1)
+                    .max(1);
+            return open + step;
         }
         // A collection expression that starts its own line is block-like: the opening `[`
         // sits at the statement indent and its elements indent one level.
@@ -1300,6 +1314,9 @@ impl<'a> Emitter<'a> {
         let total = columns.max(unit)
             * i32::try_from(self.options.wrap.continuation_indent)
                 .unwrap_or(1)
+                .max(1)
+            * i32::try_from(self.options.indent.continuous_indent_multiplier)
+                .unwrap_or(1)
                 .max(1);
         total
     }
@@ -1458,6 +1475,17 @@ impl<'a> Emitter<'a> {
         }
         if token.text(self.src) == "where" && !self.options.indent.type_constraints {
             // `indent_type_constraints = false` overrides the author's column.
+            return None;
+        }
+        if token.ast.in_query {
+            // LINQ clauses are indented from the statement, not from `from`.
+            return None;
+        }
+        if self.options.indent.continuous_indent_multiplier > 1
+            && (self.is_continuation(i) || token.ast.stmt_parent != StmtKind::None)
+        {
+            // A non-default `continuous_indent_multiplier` recomputes the column instead of
+            // keeping the author's.
             return None;
         }
         if token.ast.stmt_parent != StmtKind::None && token.ast.stmt_start != StmtKind::None {

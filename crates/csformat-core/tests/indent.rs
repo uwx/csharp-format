@@ -103,3 +103,43 @@ fn nested_statements_of_other_kinds_stay_indented() {
     let source = "class C\n{\n    void M()\n    {\n        if (a)\n            if (b)\n                M();\n    }\n}\n";
     check(source, &[], source);
 }
+
+#[test]
+fn raw_literal_string_indent_styles() {
+    let source =
+        "class C\n{\n    void M()\n    {\n        var s = \"\"\"\ntext\n\"\"\";\n    }\n}\n";
+    check(
+        source,
+        &[],
+        "class C\n{\n    void M()\n    {\n        var s = \"\"\"\n                text\n                \"\"\";\n    }\n}\n",
+    );
+    check(
+        source,
+        &["indent_raw_literal_string = indent"],
+        "class C\n{\n    void M()\n    {\n        var s = \"\"\"\n            text\n            \"\"\";\n    }\n}\n",
+    );
+    check(
+        source,
+        &["indent_raw_literal_string = do_not_change"],
+        source,
+    );
+}
+
+#[test]
+fn linq_clauses_indent_from_the_statement() {
+    let source = "class C\n{\n    void M()\n    {\n        var q = from x in xs\n                where x > 0\n                select x;\n    }\n}\n";
+    let expected = "class C\n{\n    void M()\n    {\n        var q = from x in xs\n            where x > 0\n            select x;\n    }\n}\n";
+    check(source, &[], expected);
+}
+
+#[test]
+fn continuous_indent_multiplier_scales_continuations() {
+    let source =
+        "class C\n{\n    void M()\n    {\n        Foo(Bar(Baz(1,\n            2)));\n    }\n}\n";
+    check(source, &[], source);
+    check(
+        source,
+        &["continuous_indent_multiplier = 2"],
+        "class C\n{\n    void M()\n    {\n        Foo(Bar(Baz(1,\n                2)));\n    }\n}\n",
+    );
+}
