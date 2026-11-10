@@ -302,3 +302,131 @@ fn granular_space_overrides_match_resharper() {
 ";
     assert_eq!(format(source, &options), expected);
 }
+
+const BASE_LIST: &str = "namespace P
+{
+    public class Derived : Base, IFoo, IBar
+    {
+    }
+}
+";
+
+#[test]
+fn a_type_name_moves_down_when_its_header_does_not_fit() {
+    let mut options = options();
+    options.wrap.max_length = Some(30);
+    let expected = "namespace P
+{
+    public class
+        Derived : Base, IFoo,
+        IBar
+    {
+    }
+}
+";
+    assert_eq!(format(BASE_LIST, &options), expected);
+}
+
+#[test]
+fn a_type_name_stays_up_when_its_first_base_entry_fits_nowhere() {
+    let source = "namespace P
+{
+    public class DerivedLong : SomeVeryVeryLongBaseClassName123456789012345
+    {
+    }
+}
+";
+    let mut options = options();
+    options.wrap.max_length = Some(40);
+    let expected = "namespace P
+{
+    public class DerivedLong :
+        SomeVeryVeryLongBaseClassName123456789012345
+    {
+    }
+}
+";
+    assert_eq!(format(source, &options), expected);
+}
+
+#[test]
+fn a_long_type_name_breaks_after_the_keyword() {
+    let source = "namespace P
+{
+    public class SomeVeryLongClassName1234
+    {
+    }
+}
+";
+    let mut options = options();
+    options.wrap.max_length = Some(40);
+    let expected = "namespace P
+{
+    public class
+        SomeVeryLongClassName1234
+    {
+    }
+}
+";
+    assert_eq!(format(source, &options), expected);
+}
+
+#[test]
+fn chop_always_breaks_after_the_colon_before_moving_the_type_name() {
+    let mut options = options();
+    options.wrap.max_length = Some(30);
+    options.wrap.extends_list = WrapStyle::ChopAlways;
+    let expected = "namespace P
+{
+    public class Derived :
+        Base,
+        IFoo,
+        IBar
+    {
+    }
+}
+";
+    assert_eq!(format(BASE_LIST, &options), expected);
+}
+
+#[test]
+fn chop_if_long_chops_a_base_list_that_does_not_fit() {
+    let mut options = options();
+    options.wrap.max_length = Some(40);
+    options.wrap.extends_list = WrapStyle::ChopIfLong;
+    let expected = "namespace P
+{
+    public class Derived : Base,
+        IFoo,
+        IBar
+    {
+    }
+}
+";
+    assert_eq!(format(BASE_LIST, &options), expected);
+}
+
+#[test]
+fn chop_if_long_chops_the_entries_of_a_moved_base_colon() {
+    let source = "namespace P
+{
+    public class Prim(int a) : Base(first), IFoo, IBar
+    {
+    }
+}
+";
+    let mut options = options();
+    options.wrap.max_length = Some(30);
+    options.wrap.extends_list = WrapStyle::ChopIfLong;
+    let expected = "namespace P
+{
+    public class Prim(int a)
+        : Base(first),
+            IFoo,
+            IBar
+    {
+    }
+}
+";
+    assert_eq!(format(source, &options), expected);
+}

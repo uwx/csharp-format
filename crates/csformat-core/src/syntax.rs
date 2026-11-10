@@ -41,6 +41,8 @@ pub struct AstInfo {
     pub operator: OperatorKind,
     /// The token is the first token of a member/local-function declaration.
     pub member_start: bool,
+    /// The token is the declared name of a type declaration (`class Foo`, `delegate void F`).
+    pub type_name: bool,
     /// The token is an attribute bracket belonging to a declaration (not to a parameter).
     pub member_attribute: bool,
     /// The token is inside a `switch_section` (a `case` block).
@@ -152,6 +154,8 @@ pub enum ParenKind {
     None,
     ArgumentList,
     ParameterList,
+    /// The parameter list of a primary constructor (`class C(int a)`).
+    PrimaryConstructorParameterList,
     BracketedParameterList,
     Parenthesized,
     Tuple,
@@ -171,6 +175,8 @@ pub enum ParenKind {
     Default,
     AttributeArguments,
     ConstructorInitializer,
+    /// The empty `()` of a `new()` type-parameter constraint.
+    ConstructorConstraint,
     Other,
 }
 
@@ -231,8 +237,14 @@ pub enum CommaKind {
     TypeArguments,
     TypeParameters,
     AttributeArguments,
+    /// Comma separating entries of a base list (`class C : A, B`).
+    BaseList,
+    /// Comma separating declarators of one declaration (`int a = 1, b = 2;`).
+    VariableDeclaration,
     /// Comma inside a multidimensional array rank (`new int[,]`).
     ArrayRank,
+    /// Comma between constraints of one `where` clause.
+    Constraints,
     Other,
 }
 
@@ -416,6 +428,11 @@ impl Syntax {
             if is_member_declaration(kind) && node.start_byte() == token.start {
                 info.member_start = true;
             }
+            if depth == 1 && is_named_type_declaration(kind) {
+                info.type_name = node
+                    .child_by_field_name("name")
+                    .is_some_and(|name| name.start_byte() == token.start);
+            }
             depth += 1;
             if depth > 64 || !cursor.goto_parent() {
                 break;
@@ -546,6 +563,11 @@ fn paren_kind(parent: &str, grandparent: &str) -> ParenKind {
                 ParenKind::Other
             } else if parent == "bracketed_parameter_list" {
                 ParenKind::BracketedParameterList
+            } else if matches!(
+                grandparent,
+                "class_declaration" | "struct_declaration" | "record_declaration"
+            ) {
+                ParenKind::PrimaryConstructorParameterList
             } else {
                 ParenKind::ParameterList
             }
@@ -569,6 +591,7 @@ fn paren_kind(parent: &str, grandparent: &str) -> ParenKind {
         "default_expression" => ParenKind::Default,
         "attribute_argument_list" => ParenKind::AttributeArguments,
         "constructor_initializer" => ParenKind::ConstructorInitializer,
+        "constructor_constraint" => ParenKind::ConstructorConstraint,
         "" => ParenKind::None,
         _ => ParenKind::Other,
     }
@@ -608,6 +631,8 @@ fn comma_kind(parent: &str) -> CommaKind {
     match parent {
         "argument_list" => CommaKind::ArgumentList,
         "parameter_list" | "bracketed_parameter_list" => CommaKind::ParameterList,
+        "base_list" => CommaKind::BaseList,
+        "variable_declaration" | "using_variable_declaration" => CommaKind::VariableDeclaration,
         "array_rank_specifier" => CommaKind::ArrayRank,
         "initializer_expression" | "with_initializer" | "with_expression" => CommaKind::Initializer,
         "switch_expression" => CommaKind::SwitchExpression,
@@ -615,6 +640,7 @@ fn comma_kind(parent: &str) -> CommaKind {
         "tuple_expression" => CommaKind::Tuple,
         "collection_expression" => CommaKind::CollectionExpression,
         "type_argument_list" => CommaKind::TypeArguments,
+        "type_parameter_constraints_clause" => CommaKind::Constraints,
         "type_parameter_list" => CommaKind::TypeParameters,
         "attribute_argument_list" => CommaKind::AttributeArguments,
         "" => CommaKind::None,
@@ -741,6 +767,20 @@ fn is_type_declaration(kind: &str) -> bool {
             | "delegate_declaration"
             | "namespace_declaration"
             | "file_scoped_namespace_declaration"
+    )
+}
+
+/// Declarations whose name ReSharper may move onto a continuation line.
+fn is_named_type_declaration(kind: &str) -> bool {
+    matches!(
+        kind,
+        "class_declaration"
+            | "struct_declaration"
+            | "interface_declaration"
+            | "record_declaration"
+            | "record_struct_declaration"
+            | "enum_declaration"
+            | "delegate_declaration"
     )
 }
 

@@ -9,7 +9,7 @@ use crate::config::{BraceCategory, EndOfLine, FormatOptions, IndentUnit, WrapSty
 use crate::lexer::{Token, TokenKind, lex};
 use crate::syntax::{
     AngleKind, AttributePlacement, BraceKind, BraceOwner, BracketKind, ColonKind, CommaKind,
-    OperatorKind, ParenKind, SemicolonKind, Syntax,
+    OperatorKind, ParenKind, SemicolonKind, Syntax, flags,
 };
 
 /// Placeholder for a line break inserted by the emitter.
@@ -124,6 +124,12 @@ struct Layout {
     match_close: Vec<usize>,
     /// Innermost enclosing `(`, `[` or `{` for every token (`usize::MAX` at top level).
     enclosing_open: Vec<usize>,
+    /// For every token, the index of the `:` introducing its base list (`usize::MAX` when
+    /// the token is not part of one).
+    base_owner: Vec<usize>,
+    /// For every token, the index of the first token of the declaration it belongs to
+    /// (`usize::MAX` outside declarations).
+    decl_owner: Vec<usize>,
     /// Whether a space precedes each token; mirrors `space_between`, index 0 is `false`.
     space_before: Vec<bool>,
 }
@@ -268,11 +274,18 @@ impl Layout {
             // `is_continuation` will indent the following run of tokens.
             if matches!(
                 pt,
-                "{" | ";" | "}" | ":" | "else" | "catch" | "finally" | "(" | "["
+                "{" | ";" | "}" | "else" | "catch" | "finally" | "(" | "["
             ) {
                 continue;
             }
-            if matches!(ct, "{" | "}" | ";" | ":" | ",") {
+            // A base-list colon is a wrap point on either side of the colon.
+            if pt == ":" && !matches!(prev.ast.colon, ColonKind::BaseList | ColonKind::Constraint) {
+                continue;
+            }
+            if matches!(ct, "{" | "}" | ";" | ",") {
+                continue;
+            }
+            if ct == ":" && token.ast.colon != ColonKind::BaseList {
                 continue;
             }
             let after_comma = pt == ","
@@ -283,6 +296,9 @@ impl Layout {
                         | CommaKind::AttributeArguments
                         | CommaKind::Tuple
                         | CommaKind::CollectionExpression
+                        | CommaKind::BaseList
+                        | CommaKind::VariableDeclaration
+                        | CommaKind::Constraints
                         | CommaKind::Other
                 );
             let before_operator = options.wrap.before_binary_opsign
@@ -300,11 +316,16 @@ impl Layout {
                 matches!(ct, "." | "?." | "->") && options.wrap.chained_method_calls;
             let after_dot =
                 options.wrap.after_dot_in_method_calls && matches!(pt, "." | "?." | "->");
-            let before_extends = options.wrap.before_extends_colon
-                && ct == ":"
-                && token.ast.colon == ColonKind::BaseList;
-            let before_constraint =
-                options.wrap.before_first_type_parameter_constraint && ct == "where";
+            // Whether the break happens before or after the colon depends on the current
+            // line, so `should_wrap` decides it; both sides are candidates.
+            let before_extends = ct == ":" && token.ast.colon == ColonKind::BaseList;
+            let after_extends = pt == ":" && prev.ast.colon == ColonKind::BaseList;
+            // A constraint clause wraps as a unit, so `where` is always a break point.
+            let before_constraint = ct == "where" && token.ast.has(flags::CONSTRAINT);
+            let after_constraint_colon = pt == ":" && prev.ast.colon == ColonKind::Constraint;
+            // `new()` in a constraint clause breaks before its `(` when `new` still fits.
+            let before_ctor_paren =
+                ct == "(" && token.ast.paren == ParenKind::ConstructorConstraint;
             let before_langle = options.wrap.before_type_parameter_langle
                 && ct == "<"
                 && token.ast.angle == AngleKind::TypeParameterOpen;
@@ -323,7 +344,10 @@ impl Layout {
                 || before_member
                 || after_dot
                 || before_extends
+                || after_extends
                 || before_constraint
+                || after_constraint_colon
+                || before_ctor_paren
                 || before_langle
                 || before_linq;
         }
@@ -346,6 +370,33 @@ impl Layout {
             }
         }
 
+        // Track the `:` of a base list and the start of a variable declaration so the
+        // emitter can chop `class C : A, B` and `int a = 1, b = 2` consistently.
+        let mut base_owner = vec![usize::MAX; n];
+        let mut decl_owner = vec![usize::MAX; n];
+        let mut base_cur = usize::MAX;
+        let mut decl_cur = usize::MAX;
+        for i in 0..n {
+            let text = tokens[i].text(source);
+            match text {
+                "{" | "}" | ";" | "where" => {
+                    base_cur = usize::MAX;
+                    decl_cur = usize::MAX;
+                }
+                "(" => decl_cur = usize::MAX,
+                ")" | "]" => decl_cur = usize::MAX,
+                _ => {}
+            }
+            if text == ":" && tokens[i].ast.colon == ColonKind::BaseList {
+                base_cur = i;
+            }
+            if decl_cur == usize::MAX && !text.is_empty() && !matches!(text, "{" | "}" | ";") {
+                decl_cur = i;
+            }
+            base_owner[i] = base_cur;
+            decl_owner[i] = decl_cur;
+        }
+
         let mut layout = Self {
             brace_match,
             brace_inline,
@@ -355,6 +406,8 @@ impl Layout {
             wrap_candidate,
             match_close,
             enclosing_open,
+            base_owner,
+            decl_owner,
             space_before: Vec::new(),
         };
         layout.space_before = (0..n)
@@ -501,6 +554,17 @@ struct Emitter<'a> {
     group_chop: Vec<Option<bool>>,
     /// Elements of each group that have started on the current line.
     group_elems: Vec<usize>,
+    /// For each opener, whether a per-line element limit wrapped the group (which also
+    /// honours the `after_lpar`/`before_rpar` preferences).
+    group_open_break: Vec<bool>,
+    /// Whether the layout broke a line somewhere inside a delimiter.
+    wrapped_inside: Vec<bool>,
+    /// For each base-list colon, whether the list is chopped one entry per line.
+    base_chop: Vec<Option<bool>>,
+    /// For each base-list colon, whether the colon itself starts a continuation line.
+    base_colon_break: Vec<bool>,
+    /// For each declaration start, whether its declarators are chopped one per line.
+    decl_chop: Vec<Option<bool>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -516,6 +580,8 @@ struct Frame {
 struct ParenFrame {
     /// Indentation column of the line on which the delimiter was written.
     indent: i32,
+    /// Visual column just after the delimiter.
+    content_column: i32,
     kind: ParenKind,
     seq: u32,
 }
@@ -560,6 +626,11 @@ impl<'a> Emitter<'a> {
             at_line_start: true,
             group_chop: vec![None; tokens.len()],
             group_elems: vec![0; tokens.len()],
+            group_open_break: vec![false; tokens.len()],
+            wrapped_inside: vec![false; tokens.len()],
+            base_chop: vec![None; tokens.len()],
+            base_colon_break: vec![false; tokens.len()],
+            decl_chop: vec![None; tokens.len()],
         }
     }
 
@@ -653,6 +724,17 @@ impl<'a> Emitter<'a> {
         if matches!(text, "(" | "[" | "{") {
             self.decide_chop(i);
         }
+        if text == ":" && token.ast.colon == ColonKind::BaseList {
+            // The colon starts its own line, whether the break came from the formatter or
+            // from the source layout.
+            self.base_colon_break[i] = newlines > 0;
+            self.base_chop[i] = Some(self.decide_base_chop(i));
+        } else if text == "," && token.ast.comma == CommaKind::VariableDeclaration {
+            let owner = self.layout.decl_owner[i];
+            if owner != usize::MAX && self.decl_chop[owner].is_none() {
+                self.decl_chop[owner] = Some(self.decide_decl_chop(i));
+            }
+        }
         self.update_group_counts(i, newlines);
 
         if text == ":" && token.ast.colon == ColonKind::SwitchLabel {
@@ -680,6 +762,7 @@ impl<'a> Emitter<'a> {
             self.seq += 1;
             self.paren_stack.push(ParenFrame {
                 indent: self.cur_line_column,
+                content_column: i32::try_from(self.line_len).unwrap_or(i32::MAX),
                 kind: token.ast.paren,
                 seq: self.seq,
             });
@@ -894,9 +977,14 @@ impl<'a> Emitter<'a> {
             && !self.is_statement_label(i)
             && !matches!(token.text(self.src), "{" | "}")
         {
+            let frame = self.paren_stack.last();
+            // ReSharper aligns a broken `for` header with the first token after the `(`.
+            if frame.is_some_and(|frame| frame.kind == ParenKind::For) {
+                return frame.map_or(base, |frame| frame.content_column);
+            }
             // Lines inside a broken argument/parameter list indent one level past the line
             // that opened the delimiter, not past the enclosing block.
-            let open = self.paren_stack.last().map_or(base, |frame| frame.indent);
+            let open = frame.map_or(base, |frame| frame.indent);
             return open + unit;
         }
         // A collection expression that starts its own line is block-like: the opening `[`
@@ -960,6 +1048,7 @@ impl<'a> Emitter<'a> {
                             paren.kind,
                             ParenKind::ArgumentList
                                 | ParenKind::ParameterList
+                                | ParenKind::PrimaryConstructorParameterList
                                 | ParenKind::AttributeArguments
                         ) {
                             return paren.indent + unit;
@@ -998,6 +1087,14 @@ impl<'a> Emitter<'a> {
             };
         } else if newlines > 0 && (wrapped || self.is_continuation(i)) {
             indent += self.wrap_columns();
+        }
+        if newlines > 0 {
+            // Entries of a base list whose colon starts a continuation line sit one level
+            // deeper than the colon.
+            let owner = self.layout.base_owner[i];
+            if owner != usize::MAX && owner != i && self.base_colon_break[owner] {
+                indent += self.wrap_columns();
+            }
         }
         if newlines > 0 && self.is_continuation(i) && self.directive_between_previous_code(i) {
             // Preprocessor directives do not interrupt a declaration: `#else` between two
@@ -1236,6 +1333,25 @@ impl<'a> Emitter<'a> {
         if self.preserved_line {
             return false;
         }
+        // Base lists break on one side of their colon, not at their commas.
+        if let Some(wrap) = self.extends_break(i) {
+            return wrap;
+        }
+        // A type name moves down when it cannot stay on the declaration line.
+        if let Some(wrap) = self.type_name_break(i) {
+            return wrap;
+        }
+        // A constraint clause first moves as a whole.
+        if let Some(wrap) = self.constraint_break(i) {
+            return wrap;
+        }
+        // `wrap_after_…_lpar` / `wrap_before_…_rpar` placement preferences.
+        if let Some(wrap) = self.lpar_break(i) {
+            return wrap;
+        }
+        if let Some(wrap) = self.rpar_break(i) {
+            return wrap;
+        }
         // ReSharper does not break right after a lambda arrow.
         if i > 0 && self.tokens[i - 1].text(self.src) == "=>" {
             return false;
@@ -1348,6 +1464,9 @@ impl<'a> Emitter<'a> {
                     | CommaKind::AttributeArguments
                     | CommaKind::Tuple
                     | CommaKind::CollectionExpression
+                    | CommaKind::BaseList
+                    | CommaKind::Constraints
+                    | CommaKind::VariableDeclaration
                     | CommaKind::Initializer
                     | CommaKind::TypeArguments
                     | CommaKind::TypeParameters
@@ -1444,6 +1563,23 @@ impl<'a> Emitter<'a> {
                     wrap.after_declaration_lpar,
                     wrap.before_declaration_rpar,
                 ),
+                ParenKind::PrimaryConstructorParameterList => spec(
+                    wrap.primary_constructor_parameters,
+                    wrap.max_primary_constructor_parameters_on_line,
+                    wrap.after_primary_constructor_declaration_lpar,
+                    wrap.before_primary_constructor_declaration_rpar,
+                ),
+                // A `for` header is chopped at its semicolons, not at commas.
+                ParenKind::For => spec(
+                    if wrap.for_header == WrapStyle::ChopAlways {
+                        WrapStyle::ChopAlways
+                    } else {
+                        WrapStyle::ChopIfLong
+                    },
+                    None,
+                    false,
+                    false,
+                ),
                 _ => None,
             },
             "{" => match token.ast.brace {
@@ -1533,10 +1669,371 @@ impl<'a> Emitter<'a> {
             WrapStyle::ChopIfLong => multiline || too_long,
         };
         self.group_chop[open] = Some(chop);
+        if let Some(max) = spec.max_on_line {
+            let elements = self.group_element_count(open);
+            self.group_open_break[open] = elements > max;
+        }
+    }
+
+    /// Number of elements in the list delimited by `open`.
+    fn group_element_count(&self, open: usize) -> usize {
+        let close = self.layout.match_close[open];
+        if close == usize::MAX {
+            return 0;
+        }
+        let commas = (open + 1..close)
+            .filter(|&j| {
+                self.layout.enclosing_open[j] == open && self.tokens[j].text(self.src) == ","
+            })
+            .count();
+        if self.prev_code(close) == Some(open) {
+            0
+        } else {
+            commas + 1
+        }
+    }
+
+    /// Whether the base list introduced by the `:` at `colon` is chopped one entry per line.
+    fn decide_base_chop(&self, colon: usize) -> bool {
+        let style = self.options.wrap.extends_list;
+        if style == WrapStyle::ChopAlways {
+            return true;
+        }
+        if style == WrapStyle::WrapIfLong {
+            return false;
+        }
+        // A base list moved onto a line of its own, or chopped next to a colon that starts
+        // its line, is measured from the colon: ReSharper keeps the entries on that line
+        // when they fit and puts every entry on its own line when they do not.
+        let end = self.base_list_end(colon);
+        if self.base_colon_break[colon] {
+            return self.too_long_between(colon + 1, end);
+        }
+        let multiline = (colon + 1..end).any(|j| self.tokens[j].gap.newlines > 0);
+        multiline || self.too_long_between(colon + 1, end)
+    }
+
+    /// First token after the base list introduced by `colon` (its `{`, `where` or `;`).
+    fn base_list_end(&self, colon: usize) -> usize {
+        let mut depth = 0i32;
+        for j in colon + 1..self.tokens.len() {
+            let text = self.tokens[j].text(self.src);
+            match text {
+                "(" | "[" => depth += 1,
+                ")" | "]" => depth -= 1,
+                "{" | "}" | ";" | "where" if depth <= 0 => return j,
+                _ => {}
+            }
+        }
+        self.tokens.len()
+    }
+
+    /// Width of the tokens `from..to` including the spaces the emitter inserts.
+    fn span_width(&self, from: usize, to: usize) -> usize {
+        (from..to)
+            .map(|j| {
+                let len = self.tokens[j].text(self.src).chars().count();
+                len + usize::from(j > from && self.layout.space_before[j])
+            })
+            .sum()
+    }
+
+    /// Whether the declaration whose base list starts at `colon` has a primary constructor.
+    fn primary_ctor(&self, colon: usize) -> bool {
+        let Some(prev) = self.prev_code(colon) else {
+            return false;
+        };
+        if self.tokens[prev].text(self.src) != ")" {
+            return false;
+        }
+        let open = self.layout.match_close[prev];
+        open != usize::MAX
+            && self.tokens[open].ast.paren == ParenKind::PrimaryConstructorParameterList
+    }
+
+    /// Break right after the `(` of a call/declaration whose argument list does not fit.
+    ///
+    /// `wrap_after_invocation_lpar` (and its declaration counterparts) makes the opener
+    /// stand alone as soon as its list has to wrap, even in fill mode.
+    fn lpar_break(&self, i: usize) -> Option<bool> {
+        let prev = self.prev_code(i)?;
+        if prev + 1 != i || self.tokens[prev].text(self.src) != "(" {
+            return None;
+        }
+        let spec = self.group_spec(prev)?;
+        if !spec.after_lpar || self.group_chop[prev] == Some(true) || self.group_open_break[prev] {
+            return None;
+        }
+        let close = self.layout.match_close[prev];
+        if close == usize::MAX || self.layout.inside_inline[i] {
+            return Some(false);
+        }
+        let limit = self.wrap_limit()?;
+        let width = self.span_width(prev, close + 1);
+        let space = usize::from(self.layout.space_before[i]);
+        Some(self.line_len + space + width > limit)
+    }
+
+    /// Break before the `)` of a call/declaration whose list already wrapped.
+    fn rpar_break(&self, i: usize) -> Option<bool> {
+        let token = &self.tokens[i];
+        if token.text(self.src) != ")" {
+            return None;
+        }
+        let open = self.layout.match_close[i];
+        if open == usize::MAX {
+            return None;
+        }
+        let spec = self.group_spec(open)?;
+        if !spec.before_rpar || self.group_chop[open] == Some(true) || self.group_open_break[open] {
+            return None;
+        }
+        Some(self.wrapped_inside[open])
+    }
+
+    /// Break decision for the `where` that starts a type-parameter constraint clause.
+    ///
+    /// A constraint clause wraps as a whole: ReSharper first moves the entire `where …`
+    /// run to its own line, then wraps inside it at the constraint commas.
+    fn constraint_break(&self, i: usize) -> Option<bool> {
+        let token = &self.tokens[i];
+        if token.text(self.src) != "where" || !token.ast.has(flags::CONSTRAINT) {
+            return None;
+        }
+        if self.layout.inside_inline[i] {
+            return Some(false);
+        }
+        let limit = self.wrap_limit()?;
+        let mut end = i;
+        while end < self.tokens.len() {
+            if matches!(self.tokens[end].text(self.src), "{" | "}" | ";") {
+                break;
+            }
+            end += 1;
+        }
+        let width = self.span_width(i, end);
+        let space = usize::from(self.layout.space_before[i]);
+        Some(self.line_len + space + width > limit)
+    }
+
+    /// End of the first entry of the base list introduced by `colon` (past its comma).
+    fn first_base_entry_end(&self, colon: usize) -> usize {
+        let end = self.base_list_end(colon);
+        (colon + 1..end)
+            .find(|&j| {
+                self.tokens[j].text(self.src) == ","
+                    && self.tokens[j].ast.comma == CommaKind::BaseList
+            })
+            .map_or(end, |j| j + 1)
+    }
+
+    /// Whether `from..to` fits on the current line, counting the space before `from`.
+    fn fits_on_line(&self, from: usize, to: usize) -> bool {
+        let Some(limit) = self.wrap_limit() else {
+            return true;
+        };
+        let space = usize::from(self.layout.space_before[from]);
+        self.line_len + space + self.span_width(from, to) <= limit
+    }
+
+    /// Break before the declared name of a type declaration.
+    ///
+    /// ReSharper moves the name onto a continuation line when the name and everything that
+    /// has to stay on its line does not fit. The measured run stops at the first part that
+    /// wraps on its own: a primary constructor parameter list, a base list (up to its first
+    /// entry) or a constraint clause.
+    fn type_name_break(&self, i: usize) -> Option<bool> {
+        if !self.tokens[i].ast.type_name || self.layout.inside_inline[i] {
+            return None;
+        }
+        let mut end = i + 1;
+        while end < self.tokens.len() {
+            let text = self.tokens[end].text(self.src);
+            if text == "("
+                && self.tokens[end].ast.paren == ParenKind::PrimaryConstructorParameterList
+            {
+                break;
+            }
+            if text == ":" && self.tokens[end].ast.colon == ColonKind::BaseList {
+                // In `chop_always` the first entry can move below the colon, so only the
+                // name and the colon have to fit.
+                end = if self.options.wrap.extends_list == WrapStyle::ChopAlways {
+                    end + 1
+                } else {
+                    self.first_base_entry_end(end)
+                };
+                break;
+            }
+            if matches!(text, "{" | "}" | ";" | "where") {
+                break;
+            }
+            end += 1;
+        }
+        Some(
+            !self.fits_on_line(i, end)
+                // Moving the name down only helps when the line it moves to can hold the
+                // same run; a first entry that does not fit anywhere keeps the name up.
+                && self.fits_at_continuation(i, end),
+        )
+    }
+
+    /// Whether `from..to` fits on a continuation line.
+    fn fits_at_continuation(&self, from: usize, to: usize) -> bool {
+        let Some(limit) = self.wrap_limit() else {
+            return true;
+        };
+        let base = self
+            .stack
+            .last()
+            .map(|frame| frame.case_indent.unwrap_or(frame.content_indent))
+            .unwrap_or(0);
+        let width = i32::try_from(self.span_width(from, to)).unwrap_or(i32::MAX);
+        let limit = i32::try_from(limit).unwrap_or(i32::MAX);
+        base.saturating_add(self.wrap_columns())
+            .saturating_add(width)
+            <= limit
+    }
+
+    /// Break decision for the `:` of a base list and for the token following it.
+    ///
+    /// Besides the entry commas, a base list breaks either before its colon (the colon then
+    /// starts a continuation line) or right after it. ReSharper moves the colon down for a
+    /// primary constructor whose parameter list was chopped, and honours
+    /// `wrap_before_extends_colon` for other declarations; the flag reverses the choice for
+    /// a chopped primary constructor.
+    fn extends_break(&self, i: usize) -> Option<bool> {
+        let token = &self.tokens[i];
+        let ct = token.text(self.src);
+        let colon = if ct == ":" && token.ast.colon == ColonKind::BaseList {
+            i
+        } else {
+            let prev = self.prev_code(i)?;
+            let pt = self.tokens[prev].text(self.src);
+            if pt != ":" || self.tokens[prev].ast.colon != ColonKind::BaseList {
+                return None;
+            }
+            prev
+        };
+        if self.layout.inside_inline[i] {
+            return Some(false);
+        }
+        let style = self.options.wrap.extends_list;
+        let before_extends_colon = self.options.wrap.before_extends_colon;
+        if ct == ":" {
+            let primary = self.primary_ctor(colon);
+            return Some(match style {
+                WrapStyle::ChopAlways => {
+                    primary
+                        && !self.base_colon_break[colon]
+                        && !self.fits_on_line(colon, self.first_base_entry_end(colon))
+                }
+                _ => {
+                    // Moving the colon to its own line only helps when the whole list fits
+                    // there; otherwise the list keeps wrapping at its commas.
+                    let move_colon = if primary {
+                        if before_extends_colon {
+                            // The flag reverses the choice for a chopped primary constructor:
+                            // the colon only moves when the first entry does not fit.
+                            !self.fits_on_line(colon, self.first_base_entry_end(colon))
+                        } else {
+                            !self.fits_on_line(colon, self.base_list_end(colon))
+                        }
+                    } else {
+                        before_extends_colon && !self.fits_on_line(colon, self.base_list_end(colon))
+                    };
+                    move_colon && !self.fits_on_line(colon, self.base_list_end(colon))
+                }
+            });
+        }
+        if self.base_colon_break[colon] {
+            return Some(false);
+        }
+        let first_end = self.first_base_entry_end(colon);
+        Some(match style {
+            WrapStyle::ChopAlways => !self.fits_on_line(i, first_end),
+            WrapStyle::ChopIfLong => {
+                self.base_chop[colon] == Some(true) && !self.fits_on_line(i, first_end)
+            }
+            WrapStyle::WrapIfLong => {
+                // Breaking after the colon only helps when the base list still overflows a
+                // line of its own; otherwise ReSharper keeps it in place and wraps at the
+                // commas.
+                let Some(limit) = self.wrap_limit() else {
+                    return Some(false);
+                };
+                let base = self
+                    .stack
+                    .last()
+                    .map(|frame| frame.case_indent.unwrap_or(frame.content_indent))
+                    .unwrap_or(0);
+                let limit = i32::try_from(limit).unwrap_or(i32::MAX);
+                let width = i32::try_from(self.span_width(colon, self.base_list_end(colon)))
+                    .unwrap_or(i32::MAX);
+                let fits_alone = base
+                    .saturating_add(self.wrap_columns())
+                    .saturating_add(width)
+                    <= limit;
+                !fits_alone && !before_extends_colon
+            }
+        })
+    }
+
+    /// Whether the tokens `from..to` still fit on the current line.
+    fn too_long_between(&self, from: usize, to: usize) -> bool {
+        let Some(limit) = self.wrap_limit() else {
+            return false;
+        };
+        let width: usize = (from..to)
+            .map(|j| {
+                let len = self.tokens[j].text(self.src).chars().count();
+                len + usize::from(self.layout.space_before[j])
+            })
+            .sum();
+        self.line_len + width > limit
+    }
+
+    /// Whether the declarators of the declaration containing `comma` are chopped.
+    fn decide_decl_chop(&self, comma: usize) -> bool {
+        let style = self.options.wrap.multiple_declaration;
+        if style == WrapStyle::ChopAlways {
+            return true;
+        }
+        let Some(end) = self.declaration_end(comma) else {
+            return false;
+        };
+        let too_long = self.too_long_between(comma + 1, end + 1);
+        if style == WrapStyle::WrapIfLong {
+            return too_long;
+        }
+        let multiline = (comma + 1..end).any(|j| self.tokens[j].gap.newlines > 0);
+        multiline || too_long
+    }
+
+    /// Index of the `;` that ends the declaration containing `comma`.
+    fn declaration_end(&self, comma: usize) -> Option<usize> {
+        let mut depth = 0i32;
+        for j in comma + 1..self.tokens.len() {
+            let text = self.tokens[j].text(self.src);
+            match text {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    depth -= 1;
+                }
+                ";" if depth == 0 => return Some(j),
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Forced break points inside a chopped group or a max-elements-per-line group.
     fn group_break(&self, i: usize) -> bool {
+        if self.chop_break(i) {
+            return true;
+        }
         let open = self.layout.enclosing_open[i];
         if open == usize::MAX || self.layout.inside_inline[i] {
             return false;
@@ -1545,17 +2042,30 @@ impl<'a> Emitter<'a> {
             return false;
         };
         let text = self.tokens[i].text(self.src);
-        if self.group_chop[open] == Some(true) {
+        let chopped = self.group_chop[open] == Some(true);
+        // A `for` header is chopped at its semicolons; its commas stay put.
+        let is_for = self.tokens[open].ast.paren == ParenKind::For;
+        if chopped || self.group_open_break[open] {
             if i == self.layout.match_close[open] && spec.before_rpar {
                 return true;
             }
             if self.prev_code(i) == Some(open) && spec.after_lpar {
                 return true;
             }
+        }
+        let prev = self.prev_code(i);
+        if let Some(prev) = prev {
+            if self.tokens[prev].text(self.src) == ";" && self.layout.enclosing_open[prev] == open {
+                if chopped && is_for {
+                    return true;
+                }
+            }
+        }
+        if chopped && !is_for {
             if text == "," && spec.before_comma {
                 return true;
             }
-            if let Some(prev) = self.prev_code(i) {
+            if let Some(prev) = prev {
                 if !spec.before_comma
                     && self.tokens[prev].text(self.src) == ","
                     && self.layout.enclosing_open[prev] == open
@@ -1564,7 +2074,7 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
-        if let (Some(prev), Some(max)) = (self.prev_code(i), spec.max_on_line) {
+        if let (Some(prev), Some(max)) = (prev, spec.max_on_line) {
             if self.tokens[prev].text(self.src) == ","
                 && self.layout.enclosing_open[prev] == open
                 && self.group_elems[open] >= max
@@ -1575,6 +2085,49 @@ impl<'a> Emitter<'a> {
         false
     }
 
+    /// Forced break points of a chopped base list or multi-declarator declaration.
+    fn chop_break(&self, i: usize) -> bool {
+        if self.layout.inside_inline[i] {
+            return false;
+        }
+        let before_comma = self.options.wrap.before_comma;
+        if before_comma {
+            if self.tokens[i].text(self.src) != "," {
+                return false;
+            }
+            let kind = self.tokens[i].ast.comma;
+            if kind == CommaKind::BaseList {
+                let owner = self.layout.base_owner[i];
+                if owner != usize::MAX && self.base_chop[owner] == Some(true) {
+                    return true;
+                }
+            } else if kind == CommaKind::VariableDeclaration {
+                let owner = self.layout.decl_owner[i];
+                if owner != usize::MAX && self.decl_chop[owner] == Some(true) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        let Some(prev) = self.prev_code(i) else {
+            return false;
+        };
+        if self.tokens[prev].text(self.src) != "," {
+            return false;
+        }
+        match self.tokens[prev].ast.comma {
+            CommaKind::BaseList => {
+                let owner = self.layout.base_owner[prev];
+                owner != usize::MAX && self.base_chop[owner] == Some(true)
+            }
+            CommaKind::VariableDeclaration => {
+                let owner = self.layout.decl_owner[prev];
+                owner != usize::MAX && self.decl_chop[owner] == Some(true)
+            }
+            _ => false,
+        }
+    }
+
     /// Reset per-line element counters for every group a new line starts inside, and
     /// count the element that starts at token `i`.
     fn update_group_counts(&mut self, i: usize, newlines: u32) {
@@ -1582,6 +2135,7 @@ impl<'a> Emitter<'a> {
             let mut open = self.layout.enclosing_open[i];
             while open != usize::MAX {
                 self.group_elems[open] = 0;
+                self.wrapped_inside[open] = true;
                 open = self.layout.enclosing_open[open];
             }
         }
@@ -2038,7 +2592,9 @@ fn before_paren_space(options: &FormatOptions, kind: ParenKind, default: bool) -
         ParenKind::SizeOf => "before_sizeof_parentheses",
         ParenKind::Default => "before_default_parentheses",
         ParenKind::ArgumentList | ParenKind::AttributeArguments => "before_method_call_parentheses",
-        ParenKind::ParameterList | ParenKind::BracketedParameterList => "before_method_parentheses",
+        ParenKind::ParameterList
+        | ParenKind::BracketedParameterList
+        | ParenKind::PrimaryConstructorParameterList => "before_method_parentheses",
         _ => return default,
     };
     rsharp_space(options, key, default)
@@ -2062,7 +2618,8 @@ fn within_paren_space(options: &FormatOptions, kind: ParenKind, default: bool) -
         ParenKind::ArgumentList
         | ParenKind::AttributeArguments
         | ParenKind::ParameterList
-        | ParenKind::BracketedParameterList => return default,
+        | ParenKind::BracketedParameterList
+        | ParenKind::PrimaryConstructorParameterList => return default,
         ParenKind::Parenthesized | ParenKind::Tuple | ParenKind::Cast => "within_parentheses",
         _ => return default,
     };
@@ -2075,7 +2632,9 @@ fn paren_within_default(options: &FormatOptions, kind: ParenKind) -> bool {
         ParenKind::ArgumentList | ParenKind::AttributeArguments => {
             options.space.method_call_parameter_list_parentheses
         }
-        ParenKind::ParameterList | ParenKind::BracketedParameterList => {
+        ParenKind::ParameterList
+        | ParenKind::BracketedParameterList
+        | ParenKind::PrimaryConstructorParameterList => {
             options.space.method_declaration_parameter_list_parentheses
         }
         _ => options.space.between_parentheses,
@@ -2626,6 +3185,10 @@ fn paren_space(
         return rsharp_space(options, "before_nameof_parentheses", false);
     }
     if pt == "new" {
+        // `new()` in a type-parameter constraint is never spaced.
+        if cur.ast.paren == ParenKind::ConstructorConstraint {
+            return false;
+        }
         // `new (T a, T b)[…]` (tuple type) needs the space; target-typed `new()` has its
         // own preference; `new Foo(…)` and `new string(…)` do not.
         if cur.ast.paren == ParenKind::ArgumentList {
@@ -2692,7 +3255,9 @@ fn paren_space(
         }
         if matches!(
             cur.ast.paren,
-            ParenKind::ParameterList | ParenKind::BracketedParameterList
+            ParenKind::ParameterList
+                | ParenKind::BracketedParameterList
+                | ParenKind::PrimaryConstructorParameterList
         ) {
             return options.space.method_declaration_name_and_open_paren;
         }
@@ -2730,7 +3295,9 @@ fn paren_space(
                 options.space.method_call_name_and_open_paren,
             )
         }
-        ParenKind::ParameterList | ParenKind::BracketedParameterList => {
+        ParenKind::ParameterList
+        | ParenKind::BracketedParameterList
+        | ParenKind::PrimaryConstructorParameterList => {
             let empty = tokens.get(i + 1).is_some_and(|t| t.text(src) == ")");
             if empty {
                 return rsharp_space(
@@ -2745,7 +3312,7 @@ fn paren_space(
                 options.space.method_declaration_name_and_open_paren,
             )
         }
-        ParenKind::ConstructorInitializer => false,
+        ParenKind::ConstructorInitializer | ParenKind::ConstructorConstraint => false,
         ParenKind::If
         | ParenKind::While
         | ParenKind::For
@@ -2843,7 +3410,7 @@ fn is_word(token: &Token) -> bool {
 fn empty_paren_space(open: &Token, options: &FormatOptions) -> bool {
     match open.ast.paren {
         ParenKind::ArgumentList => options.space.method_call_empty_parameter_list_parentheses,
-        ParenKind::ParameterList => {
+        ParenKind::ParameterList | ParenKind::PrimaryConstructorParameterList => {
             options
                 .space
                 .method_declaration_empty_parameter_list_parentheses
