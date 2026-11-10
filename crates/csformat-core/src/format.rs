@@ -120,6 +120,9 @@ struct Layout {
     /// Whether the token belongs to a construct whose written line breaks are being
     /// removed (`keep_existing_*_arrangement = false`).
     collapsed: Vec<bool>,
+    /// For a parenthesis whose arrangement is not kept: the first token after the `(` and
+    /// the `)` itself are written tight against their neighbours.
+    paren_tight: Vec<bool>,
     /// `true` for a `<` that opens a generic argument or type parameter list.
     generic_open: Vec<bool>,
     /// `true` for a `>`/`>>`/`>>>` that closes such a list.
@@ -206,9 +209,10 @@ impl Layout {
                 // lambda bodies on one line, but always expands type, namespace,
                 // method and control-flow blocks.
                 let eligible = match kind {
-                    BraceKind::Initializer | BraceKind::Pattern | BraceKind::SwitchExpression => {
-                        true
-                    }
+                    BraceKind::Initializer | BraceKind::Pattern => true,
+                    // A kept switch-expression arrangement may stay on one line; otherwise
+                    // the arms are always expanded.
+                    BraceKind::SwitchExpression => options.keep.switch_expression_arrangement,
                     // Unclassified braces come from ERROR nodes (constructs tree-sitter
                     // cannot parse). Keep them as written instead of inventing a block
                     // layout, which would only widen the parse-error region.
@@ -274,9 +278,12 @@ impl Layout {
         }
 
         // `keep_existing_*_arrangement = false` pulls the written line breaks back out of a
-        // construct: initializers, patterns and argument/parameter lists are re-flowed onto
-        // one line when they hold nothing but simple tokens.
+        // construct. Initializers, patterns and list/collection literals are re-flowed onto
+        // one line when they hold nothing but simple tokens; for parentheses only the
+        // breaks next to the delimiters are removed, because ReSharper treats the list
+        // elements as user line breaks (`keep_user_linebreaks`).
         let mut collapsed = vec![false; n];
+        let mut paren_tight = vec![false; n];
         let keep = &options.keep;
         // A construct is only re-flowed when the result fits on one line.
         let limit = if options.wrap.enabled {
@@ -286,7 +293,37 @@ impl Layout {
         };
         for open in 0..n {
             let ast = tokens[open].ast;
-            let collapse = match tokens[open].text(source) {
+            let text = tokens[open].text(source);
+            let close = match_close[open];
+            if text == "(" {
+                let tighten = match ast.paren {
+                    ParenKind::ArgumentList => !keep.invocation_parens_arrangement,
+                    ParenKind::ParameterList | ParenKind::BracketedParameterList => {
+                        !keep.declaration_parens_arrangement
+                    }
+                    ParenKind::PrimaryConstructorParameterList => {
+                        !keep.declaration_parens_arrangement
+                            || !keep.primary_constructor_declaration_parens_arrangement
+                    }
+                    _ if ast.lambda_parameter_list => {
+                        !keep.lambda_and_anonymous_function_parens_arrangement
+                    }
+                    _ => false,
+                };
+                if !tighten || close == usize::MAX || !range_has_no_trivia(tokens, open, close) {
+                    continue;
+                }
+                if let Some(first) = (open + 1..close).find(|&j| !tokens[j].is_trivia()) {
+                    paren_tight[first] = true;
+                }
+                paren_tight[close] = true;
+                // `delegate` and its parameter list form one unit.
+                if ast.lambda_parameter_list && prev_code_is(tokens, source, open, "delegate") {
+                    paren_tight[open] = true;
+                }
+                continue;
+            }
+            let collapse = match text {
                 "{" => match ast.brace {
                     BraceKind::Initializer => !keep.initializer_arrangement,
                     BraceKind::Pattern => !keep.property_patterns_arrangement,
@@ -298,25 +335,10 @@ impl Layout {
                         BracketKind::ListPattern | BracketKind::CollectionExpression
                     ) && !keep.list_patterns_arrangement
                 }
-                "(" => match ast.paren {
-                    ParenKind::ArgumentList => !keep.invocation_parens_arrangement,
-                    ParenKind::ParameterList | ParenKind::BracketedParameterList => {
-                        !keep.declaration_parens_arrangement
-                    }
-                    ParenKind::PrimaryConstructorParameterList => {
-                        !keep.declaration_parens_arrangement
-                            || !keep.primary_constructor_declaration_parens_arrangement
-                    }
-                    _ => false,
-                },
                 _ => false,
             };
-            if !collapse {
-                continue;
-            }
-            let close = match_close[open];
-
-            if close == usize::MAX
+            if !collapse
+                || close == usize::MAX
                 || !range_collapsible(source, tokens, open, close)
                 || !fits_on_one_line(source, tokens, open, close, limit)
             {
@@ -325,8 +347,29 @@ impl Layout {
             for slot in &mut collapsed[open..=close] {
                 *slot = true;
             }
-            if tokens[open].text(source) == "{" {
+            if text == "{" {
                 brace_inline[open] = true;
+            }
+        }
+
+        // An anonymous method keeps its body expanded while its parameter list (or the
+        // `delegate` keyword) spans several lines.
+        for open in 0..n {
+            if tokens[open].text(source) != "{" {
+                continue;
+            }
+            if tokens[open].ast.brace_owner != BraceOwner::AnonymousMethod || !brace_inline[open] {
+                continue;
+            }
+            let mut j = open;
+            while j > 0 && tokens[j].text(source) != "delegate" {
+                j -= 1;
+            }
+            if tokens[j].text(source) != "delegate" {
+                continue;
+            }
+            if (j + 1..open).any(|k| tokens[k].gap.newlines > 0 && !paren_tight[k]) {
+                brace_inline[open] = false;
             }
         }
 
@@ -539,6 +582,7 @@ impl Layout {
             brace_inline,
             inside_inline,
             collapsed,
+            paren_tight,
             generic_open,
             generic_close,
             wrap_candidate,
@@ -587,6 +631,26 @@ fn block_is_simple(source: &str, tokens: &[Token], open: usize, close: usize) ->
         }
     }
     statements <= 1
+}
+
+/// Whether the first code token before `i` is `word`.
+fn prev_code_is(tokens: &[Token], source: &str, i: usize, word: &str) -> bool {
+    let mut j = i;
+    while j > 0 {
+        j -= 1;
+        if tokens[j].is_trivia() {
+            continue;
+        }
+        return tokens[j].text(source) == word;
+    }
+    false
+}
+
+/// Whether `open..close` holds no comments or directives.
+fn range_has_no_trivia(tokens: &[Token], open: usize, close: usize) -> bool {
+    tokens[open + 1..close]
+        .iter()
+        .all(|token| !token.kind.is_comment() && token.kind != TokenKind::Directive)
 }
 
 /// Whether the whole range `open..=close` can be re-flowed onto one line: no comments,
@@ -1709,6 +1773,19 @@ impl<'a> Emitter<'a> {
                             return paren.indent + unit;
                         }
                     }
+                    // A head that spans several lines still aligns its body with the line
+                    // that introduced it, not with the last line of the head.
+                    if let Some(prev) = self.prev_code(i) {
+                        match self.tokens[prev].text(self.src) {
+                            ")" => {
+                                if let Some(column) = self.last_closed_paren_indent {
+                                    return column;
+                                }
+                            }
+                            "delegate" => return base,
+                            _ => {}
+                        }
+                    }
                     return self.cur_line_column;
                 }
                 let after_header = self
@@ -2196,7 +2273,7 @@ impl<'a> Emitter<'a> {
     fn should_wrap(&self, i: usize) -> bool {
         // A construct whose written breaks are being removed stays on one line; the
         // collapse pass already checked that it fits.
-        if self.layout.collapsed[i] {
+        if self.layout.collapsed[i] || self.layout.paren_tight[i] {
             return false;
         }
         // `force_chop_compound_*` puts every operand of a compound condition on its own line.
@@ -3504,6 +3581,11 @@ impl<'a> Emitter<'a> {
         if self.layout.collapsed[i] {
             return 0;
         }
+        // A parenthesis whose arrangement is not kept hugs its neighbours: no break right
+        // after the `(` and none right before the `)`.
+        if self.layout.paren_tight[i] {
+            return 0;
+        }
 
         // Region directives: `around_region` is the blank line before `#region`,
         // `inside_region` the padding just after `#region` and before `#endregion`.
@@ -3723,7 +3805,11 @@ impl<'a> Emitter<'a> {
                 return gap.max(1).min(cap);
             }
             if prev.ast.comma == CommaKind::SwitchExpression {
-                // Switch-expression arms keep the author's line breaks.
+                // Switch-expression arms keep the author's line breaks unless the
+                // arrangement is not kept, in which case every arm starts a line.
+                if !self.options.keep.switch_expression_arrangement {
+                    return gap.max(1).min(cap);
+                }
                 return gap.min(1);
             }
         }
@@ -3781,6 +3867,16 @@ impl<'a> Emitter<'a> {
             return (self.options.blank_lines.inside_region as u32 + 1).min(cap);
         }
 
+        // `keep_existing_embedded_arrangement = false` positions the body of an `if`,
+        // `else`, `for`, `foreach`, `while`, `using`, `lock` or `fixed` statement according
+        // to `place_simple_embedded_statement_on_same_line`.
+        if !self.options.keep.embedded_arrangement
+            && !in_inline
+            && let Some(same_line) = self.embedded_statement_same_line(i)
+        {
+            return if same_line { 0 } else { gap.max(1).min(cap) };
+        }
+
         // `keep_existing_expr_member_arrangement = false` pulls the arrow of an expression
         // body back onto the declaration line.
         if ct == "=>"
@@ -3816,6 +3912,56 @@ impl<'a> Emitter<'a> {
 
     fn is_member_start(&self, i: usize) -> bool {
         self.tokens[i].ast.member_start
+    }
+
+    /// Whether token `i` starts the non-block body of a single-statement owner
+    /// (`if`/`else`/`for`/`foreach`/`while`/`using`/`lock`/`fixed`), and whether it should
+    /// stay on the owner's line under
+    /// `place_simple_embedded_statement_on_same_line`.
+    fn embedded_statement_same_line(&self, i: usize) -> Option<bool> {
+        let token = &self.tokens[i];
+        let ct = token.text(self.src);
+        if token.kind.is_comment() || matches!(ct, "{" | "}" | ";") {
+            return None;
+        }
+        // `else if` is a compound statement, not an embedded body.
+        if ct == "if"
+            && self
+                .prev_code(i)
+                .is_some_and(|prev| self.tokens[prev].text(self.src) == "else")
+        {
+            return None;
+        }
+        if token.ast.stmt_parent == StmtKind::None {
+            return None;
+        }
+        Some(
+            match self.options.place.simple_embedded_statement_on_same_line {
+                SameLinePlacement::Always => true,
+                SameLinePlacement::Never => false,
+                SameLinePlacement::IfOwnerIsSingleLine => !self.owner_multiline_except_body(i),
+            },
+        )
+    }
+
+    /// Whether the statement that owns the embedded body starting at `i` spans several
+    /// lines, ignoring the body itself (the body's own breaks do not count).
+    fn owner_multiline_except_body(&self, i: usize) -> bool {
+        let token = &self.tokens[i];
+        let start = token.ast.stmt_parent_start;
+        let end = token.ast.stmt_parent_end;
+        let body = token.ast.stmt_start_end;
+        let head_end = if i > 0 {
+            self.tokens[i - 1].end
+        } else {
+            token.start
+        };
+        if end <= start || body < token.start {
+            return true;
+        }
+        let head = self.src.get(start..head_end).unwrap_or("");
+        let tail = self.src.get(body..end).unwrap_or("");
+        head.contains('\n') || tail.contains('\n')
     }
 
     /// Whether token `i` (the `[` or `]` of an attribute section) sits in the parameter

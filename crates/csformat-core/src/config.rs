@@ -663,7 +663,7 @@ pub struct PlaceOptions {
     pub simple_anonymousmethod_on_single_line: bool,
     pub simple_case_statement_on_same_line: bool,
     pub simple_embedded_block_on_same_line: bool,
-    pub simple_embedded_statement_on_same_line: bool,
+    pub simple_embedded_statement_on_same_line: SameLinePlacement,
     pub simple_enum_on_single_line: bool,
     pub simple_initializer_on_single_line: bool,
     pub simple_list_pattern_on_single_line: bool,
@@ -696,7 +696,7 @@ impl Default for PlaceOptions {
             simple_anonymousmethod_on_single_line: true,
             simple_case_statement_on_same_line: false,
             simple_embedded_block_on_same_line: false,
-            simple_embedded_statement_on_same_line: true,
+            simple_embedded_statement_on_same_line: SameLinePlacement::IfOwnerIsSingleLine,
             simple_enum_on_single_line: false,
             simple_initializer_on_single_line: true,
             simple_list_pattern_on_single_line: true,
@@ -725,6 +725,9 @@ impl PlaceOptions {
                 Some(&mut self.record_field_attribute_on_same_line)
             }
             "type_attribute_on_same_line" => Some(&mut self.type_attribute_on_same_line),
+            "simple_embedded_statement_on_same_line" => {
+                Some(&mut self.simple_embedded_statement_on_same_line)
+            }
             _ => None,
         };
         if let Some(slot) = attribute {
@@ -765,9 +768,6 @@ impl PlaceOptions {
             }
             "simple_case_statement_on_same_line" => &mut self.simple_case_statement_on_same_line,
             "simple_embedded_block_on_same_line" => &mut self.simple_embedded_block_on_same_line,
-            "simple_embedded_statement_on_same_line" => {
-                &mut self.simple_embedded_statement_on_same_line
-            }
             "simple_enum_on_single_line" => &mut self.simple_enum_on_single_line,
             "simple_initializer_on_single_line" => &mut self.simple_initializer_on_single_line,
             "simple_list_pattern_on_single_line" => &mut self.simple_list_pattern_on_single_line,
@@ -809,6 +809,7 @@ pub struct KeepOptions {
     pub expr_member_arrangement: bool,
     pub initializer_arrangement: bool,
     pub invocation_parens_arrangement: bool,
+    pub lambda_and_anonymous_function_parens_arrangement: bool,
     pub list_patterns_arrangement: bool,
     pub primary_constructor_declaration_parens_arrangement: bool,
     pub property_patterns_arrangement: bool,
@@ -828,6 +829,7 @@ impl Default for KeepOptions {
             expr_member_arrangement: true,
             initializer_arrangement: true,
             invocation_parens_arrangement: true,
+            lambda_and_anonymous_function_parens_arrangement: true,
             list_patterns_arrangement: true,
             primary_constructor_declaration_parens_arrangement: true,
             property_patterns_arrangement: true,
@@ -852,6 +854,9 @@ impl KeepOptions {
             "expr_member_arrangement" => &mut self.expr_member_arrangement,
             "initializer_arrangement" => &mut self.initializer_arrangement,
             "invocation_parens_arrangement" => &mut self.invocation_parens_arrangement,
+            "lambda_and_anonymous_function_parens_arrangement" => {
+                &mut self.lambda_and_anonymous_function_parens_arrangement
+            }
             "list_patterns_arrangement" => &mut self.list_patterns_arrangement,
             "primary_constructor_declaration_parens_arrangement" => {
                 &mut self.primary_constructor_declaration_parens_arrangement

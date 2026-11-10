@@ -142,3 +142,72 @@ fn attribute_sections_follow_the_run_placement() {
         source,
     );
 }
+
+#[test]
+fn embedded_statements_follow_the_place_option_when_not_kept() {
+    let source = "class C\n{\n    void M(int a)\n    {\n        if (a > 0) M(a);\n        if (a > 0) M(a);\n        else M(0);\n        lock (this)\n            M(a);\n    }\n}\n";
+    check(
+        source,
+        &["keep_existing_embedded_arrangement = false"],
+        "class C\n{\n    void M(int a)\n    {\n        if (a > 0) M(a);\n        if (a > 0)\n            M(a);\n        else\n            M(0);\n        lock (this) M(a);\n    }\n}\n",
+    );
+    // `always` pulls a body up even when its owner spans several lines.
+    let broken =
+        "class C\n{\n    void M(int a)\n    {\n        if (a > 0)\n            M(a);\n    }\n}\n";
+    check(
+        broken,
+        &[
+            "keep_existing_embedded_arrangement = false",
+            "place_simple_embedded_statement_on_same_line = always",
+        ],
+        "class C\n{\n    void M(int a)\n    {\n        if (a > 0) M(a);\n    }\n}\n",
+    );
+    // The default keeps the author's arrangement.
+    check(broken, &[], broken);
+}
+
+#[test]
+fn switch_expression_expands_when_not_kept() {
+    let source = "class C\n{\n    void M(int a)\n    {\n        int y = a switch { 1 => 2, _ => 3 };\n    }\n}\n";
+    check(source, &[], source);
+    check(
+        source,
+        &["keep_existing_switch_expression_arrangement = false"],
+        "class C\n{\n    void M(int a)\n    {\n        int y = a switch\n        {\n            1 => 2,\n            _ => 3\n        };\n    }\n}\n",
+    );
+}
+
+#[test]
+fn paren_arrangement_only_tightens_the_delimiters() {
+    let invocation = "class C\n{\n    void M(int a)\n    {\n        M(\n            a,\n            a);\n    }\n}\n";
+    check(
+        invocation,
+        &["keep_existing_invocation_parens_arrangement = false"],
+        "class C\n{\n    void M(int a)\n    {\n        M(a,\n            a);\n    }\n}\n",
+    );
+    let declaration = "class C\n{\n    void N(\n        int a,\n        int b)\n    {\n    }\n}\n";
+    check(
+        declaration,
+        &["keep_existing_declaration_parens_arrangement = false"],
+        "class C\n{\n    void N(int a,\n        int b)\n    {\n    }\n}\n",
+    );
+}
+
+#[test]
+fn lambda_parameter_list_tightens_when_not_kept() {
+    let source = "class C\n{\n    void M(int a)\n    {\n        System.Action h = delegate\n        (\n            int q) { M(q); };\n    }\n}\n";
+    // A multi-line head expands the body; the head itself keeps its layout.
+    let expanded = "class C\n{\n    void M(int a)\n    {\n        System.Action h = delegate\n        (\n            int q)\n        {\n            M(q);\n        };\n    }\n}\n";
+    check(source, &[], expanded);
+    check(
+        source,
+        &["keep_existing_lambda_and_anonymous_function_parens_arrangement = false"],
+        "class C\n{\n    void M(int a)\n    {\n        System.Action h = delegate(int q) { M(q); };\n    }\n}\n",
+    );
+}
+
+#[test]
+fn anonymous_method_body_stays_expanded_with_a_multiline_head() {
+    let source = "class C\n{\n    void M(int a)\n    {\n        System.Action h = delegate\n        (\n            int q,\n            int r)\n        {\n            M(q + r);\n        };\n    }\n}\n";
+    check(source, &[], source);
+}

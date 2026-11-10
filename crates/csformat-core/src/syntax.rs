@@ -125,6 +125,8 @@ pub struct AstInfo {
     pub brace: BraceKind,
     pub brace_owner: BraceOwner,
     pub paren: ParenKind,
+    /// The `(` of a lambda expression's or anonymous method's parameter list.
+    pub lambda_parameter_list: bool,
     pub bracket: BracketKind,
     pub angle: AngleKind,
     pub colon: ColonKind,
@@ -176,10 +178,14 @@ pub struct AstInfo {
     pub stmt_parent: StmtKind,
     /// Start byte of that enclosing statement.
     pub stmt_parent_start: usize,
+    /// End byte of that enclosing statement.
+    pub stmt_parent_end: usize,
     /// Whether the token belongs to a LINQ query expression.
     pub in_query: bool,
     /// Start byte of the innermost statement that contains the token.
     pub stmt_owner_start: usize,
+    /// End byte of the statement that starts at this token.
+    pub stmt_start_end: usize,
     /// Whether that statement spans several source lines.
     pub stmt_start_multiline: bool,
     /// Whether that statement (or a nested unbraced body) owns a block.
@@ -547,6 +553,8 @@ impl Syntax {
         let mut stmt_start = StmtKind::None;
         let mut stmt_parent = StmtKind::None;
         let mut stmt_parent_start = 0usize;
+        let mut stmt_parent_end = 0usize;
+        let mut stmt_start_end = 0usize;
         let mut in_query = false;
         let mut stmt_owner_start = usize::MAX;
         let mut stmt_start_multiline = false;
@@ -605,10 +613,12 @@ impl Syntax {
                     .is_some_and(|text| text.contains('\n'));
                 if node.start_byte() == token.start {
                     stmt_start = stmt_kind(kind);
+                    stmt_start_end = node.end_byte();
                     if let Some(parent) = node.parent() {
                         if stmt_kind(parent.kind()).is_single_statement_owner() {
                             stmt_parent = stmt_kind(parent.kind());
                             stmt_parent_start = parent.start_byte();
+                            stmt_parent_end = parent.end_byte();
                         }
                     }
                     stmt_start_multiline = multiline;
@@ -696,6 +706,11 @@ impl Syntax {
         info.brace = brace_kind(parent_kind, grandparent_kind);
         info.brace_owner = brace_owner(parent_kind, grandparent_kind);
         info.paren = paren_kind(parent_kind, grandparent_kind);
+        info.lambda_parameter_list = parent_kind == "parameter_list"
+            && matches!(
+                grandparent_kind,
+                "lambda_expression" | "anonymous_method_expression"
+            );
         info.bracket = bracket_kind(parent_kind);
         info.member_attribute =
             info.bracket == BracketKind::Attribute && is_member_declaration(grandparent_kind);
@@ -713,6 +728,8 @@ impl Syntax {
         info.stmt_start = stmt_start;
         info.stmt_parent = stmt_parent;
         info.stmt_parent_start = stmt_parent_start;
+        info.stmt_parent_end = stmt_parent_end;
+        info.stmt_start_end = stmt_start_end;
         info.in_query = in_query;
         info.stmt_owner_start = stmt_owner_start;
         info.stmt_start_multiline = stmt_start_multiline;
