@@ -638,6 +638,7 @@ pub struct PlaceOptions {
     pub accessor_attribute_on_same_line: SameLinePlacement,
     pub accessor_with_attrs_holder_on_single_line: bool,
     pub accessorholder_attribute_on_same_line: SameLinePlacement,
+    pub allow_comment_after_lbrace: bool,
     pub comments_at_first_column: bool,
     pub constructor_initializer_on_same_line: bool,
     pub expr_accessor_on_single_line: bool,
@@ -670,6 +671,7 @@ impl Default for PlaceOptions {
             accessor_attribute_on_same_line: SameLinePlacement::Never,
             accessor_with_attrs_holder_on_single_line: false,
             accessorholder_attribute_on_same_line: SameLinePlacement::IfOwnerIsSingleLine,
+            allow_comment_after_lbrace: false,
             comments_at_first_column: false,
             constructor_initializer_on_same_line: true,
             expr_accessor_on_single_line: true,
@@ -735,6 +737,7 @@ impl PlaceOptions {
             "accessor_with_attrs_holder_on_single_line" => {
                 &mut self.accessor_with_attrs_holder_on_single_line
             }
+            "allow_comment_after_lbrace" => &mut self.allow_comment_after_lbrace,
             "comments_at_first_column" => &mut self.comments_at_first_column,
             "constructor_initializer_on_same_line" => {
                 &mut self.constructor_initializer_on_same_line
@@ -1917,6 +1920,21 @@ pub fn apply_key(
             value: value_trim.to_owned(),
         });
     };
+
+    if key == "resharper_allow_comment_after_lbrace" {
+        match options
+            .place
+            .set_resharper("allow_comment_after_lbrace", value_trim)
+        {
+            Some(true) => push(&key),
+            Some(false) => options.warnings.push(format!(
+                "{}: invalid value for {key}: {value_trim:?}",
+                path.display()
+            )),
+            None => {}
+        }
+        return;
+    }
 
     if let Some(rest) = key.strip_prefix("resharper_place_") {
         match options.place.set_resharper(rest, value_trim) {

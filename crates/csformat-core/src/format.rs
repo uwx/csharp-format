@@ -482,6 +482,11 @@ impl Layout {
 /// True when every accessor in an accessor list has a semicolon body (an auto-property).
 ///
 /// `{ get; set; }` is kept on one line; `{ get => x; set { } }` is expanded.
+/// Whether token `i` starts a type-parameter constraint clause.
+fn token_kind_is_where_clause(tokens: &[Token], source: &str, i: usize) -> bool {
+    tokens[i].text(source) == "where" && tokens[i].ast.has(flags::CONSTRAINT)
+}
+
 /// Whether the block `open..close` holds at most one simple statement: no comments, no
 /// directives and no nested blocks.
 fn block_is_simple(source: &str, tokens: &[Token], open: usize, close: usize) -> bool {
@@ -1984,6 +1989,19 @@ impl<'a> Emitter<'a> {
         if self.preserved_line {
             return false;
         }
+        // `place_type_constraints_on_same_line = false` and
+        // `place_constructor_initializer_on_same_line = false` move those clauses down.
+        if token_kind_is_where_clause(self.tokens, self.src, i)
+            && !self.options.place.type_constraints_on_same_line
+        {
+            return true;
+        }
+        if self.tokens[i].text(self.src) == ":"
+            && self.tokens[i].ast.colon == ColonKind::ConstructorInitializer
+            && !self.options.place.constructor_initializer_on_same_line
+        {
+            return true;
+        }
         // Base lists break on one side of their colon, not at their commas.
         if let Some(wrap) = self.extends_break(i) {
             return wrap;
@@ -3225,8 +3243,12 @@ impl<'a> Emitter<'a> {
             return gap.min(cap);
         }
 
-        // Trailing line comments stay on the line they were written on.
-        if token.kind == TokenKind::LineComment && gap == 0 && !(pt == "{" && !in_inline) {
+        // Trailing line comments stay on the line they were written on, unless they follow
+        // an opening brace and `allow_comment_after_lbrace` is off.
+        if token.kind == TokenKind::LineComment
+            && gap == 0
+            && !(pt == "{" && !in_inline && !self.options.place.allow_comment_after_lbrace)
+        {
             return 0;
         }
 

@@ -392,3 +392,54 @@ fn attribute_placement_options() {
         "class C\n{\n    [My] int f;\n\n    [My] void M()\n    {\n    }\n}\n",
     );
 }
+
+#[test]
+fn type_constraints_move_down_when_asked() {
+    let same_line = "class C<T> where T : class\n{\n}\n";
+    let moved = "class C<T>\n    where T : class\n{\n}\n";
+    check(same_line, &[], same_line);
+    check(
+        same_line,
+        &["place_type_constraints_on_same_line = false"],
+        moved,
+    );
+    check(moved, &[], moved);
+    check(
+        moved,
+        &["place_type_constraints_on_same_line = true"],
+        moved,
+    );
+}
+
+#[test]
+fn constructor_initializer_moves_down_when_asked() {
+    let same_line = "class C\n{\n    C() : base()\n    {\n    }\n}\n";
+    let moved = "class C\n{\n    C()\n        : base()\n    {\n    }\n}\n";
+    check(same_line, &[], same_line);
+    check(
+        same_line,
+        &["place_constructor_initializer_on_same_line = false"],
+        moved,
+    );
+    check(moved, &[], moved);
+    check(
+        moved,
+        &["place_constructor_initializer_on_same_line = true"],
+        moved,
+    );
+}
+
+#[test]
+fn comment_after_left_brace_stays_when_allowed() {
+    let source = "class C\n{\n    void M(int a)\n    {\n        if (a > 0) { // trailing\n            M(a);\n        }\n    }\n}\n";
+    check(
+        source,
+        &[],
+        "class C\n{\n    void M(int a)\n    {\n        if (a > 0)\n        {\n            // trailing\n            M(a);\n        }\n    }\n}\n",
+    );
+    check(
+        source,
+        &["allow_comment_after_lbrace = true"],
+        "class C\n{\n    void M(int a)\n    {\n        if (a > 0)\n        { // trailing\n            M(a);\n        }\n    }\n}\n",
+    );
+}
