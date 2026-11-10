@@ -359,3 +359,36 @@ fn simple_method_bodies_collapse_when_asked() {
         "class C\n{\n    void M() { P = 1; }\n\n    int P;\n}\n",
     );
 }
+
+#[test]
+fn embedded_block_placement() {
+    let source = "class C\n{\n    void M(int a)\n    {\n        if (a > 0)\n        {\n            M(a);\n        }\n    }\n}\n";
+    check(source, &[], source);
+    let inline = "class C\n{\n    void M(int a)\n    {\n        if (a > 0) { M(a); }\n    }\n}\n";
+    check(
+        inline,
+        &[],
+        "class C\n{\n    void M(int a)\n    {\n        if (a > 0)\n        {\n            M(a);\n        }\n    }\n}\n",
+    );
+    check(
+        inline,
+        &["place_simple_embedded_block_on_same_line = true"],
+        inline,
+    );
+}
+
+#[test]
+fn attribute_placement_options() {
+    let source = "class C\n{\n    [My] int f;\n\n    [My]\n    void M()\n    {\n    }\n}\n";
+    check(source, &[], source);
+    check(
+        source,
+        &["place_field_attribute_on_same_line = never"],
+        "class C\n{\n    [My]\n    int f;\n\n    [My]\n    void M()\n    {\n    }\n}\n",
+    );
+    check(
+        source,
+        &["place_method_attribute_on_same_line = always"],
+        "class C\n{\n    [My] int f;\n\n    [My] void M()\n    {\n    }\n}\n",
+    );
+}

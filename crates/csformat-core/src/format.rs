@@ -6,7 +6,8 @@
 //! comments, directives and literals) is preserved exactly.
 
 use crate::config::{
-    AlignIndentStyle, BraceCategory, EndOfLine, FormatOptions, IndentUnit, SpecialIndent, WrapStyle,
+    AlignIndentStyle, BraceCategory, EndOfLine, FormatOptions, IndentUnit, SameLinePlacement,
+    SpecialIndent, WrapStyle,
 };
 use crate::lexer::{Token, TokenKind, lex};
 use crate::syntax::{
@@ -227,7 +228,8 @@ impl Layout {
                         | BraceOwner::Destructor
                         | BraceOwner::Operator
                         | BraceOwner::LocalFunction => place.simple_method_on_single_line,
-                        // Lambdas and control-flow bodies keep the author's arrangement.
+                        BraceOwner::Control => place.simple_embedded_block_on_same_line,
+                        // Lambdas keep the author's arrangement.
                         _ => continue,
                     };
                     brace_inline[open] = collapse && block_is_simple(source, tokens, open, close);
@@ -3247,7 +3249,30 @@ impl<'a> Emitter<'a> {
         } else if pt == "]" && prev.ast.member_attribute {
             let start = self.attribute_run_start(i - 1);
             let too_long = self.attribute_list_long(start);
-            let placement = match prev.ast.attribute {
+            // The `place_*_attribute_on_same_line` options override the per-kind default.
+            // `decl_start` sits on the attribute section, not on the member token.
+            let declared = self.tokens[start].ast.decl_start;
+            let configured = match declared {
+                DeclKind::Field => Some(self.options.place.field_attribute_on_same_line),
+                DeclKind::Type => Some(self.options.place.type_attribute_on_same_line),
+                DeclKind::Invocable | DeclKind::LocalMethod => {
+                    Some(self.options.place.method_attribute_on_same_line)
+                }
+                DeclKind::Property | DeclKind::AutoProperty => {
+                    Some(self.options.place.accessorholder_attribute_on_same_line)
+                }
+                DeclKind::Accessor => Some(self.options.place.accessor_attribute_on_same_line),
+                _ => None,
+            };
+            let kind_default = match configured {
+                Some(SameLinePlacement::Always) => AttributePlacement::SameLine,
+                Some(SameLinePlacement::Never) => AttributePlacement::OwnLine,
+                Some(SameLinePlacement::IfOwnerIsSingleLine) => {
+                    AttributePlacement::SameLineIfSingleLine
+                }
+                None => prev.ast.attribute,
+            };
+            let placement = match kind_default {
                 // Fields and event fields stay on the declaration line unless the attribute
                 // list itself is too long to fit.
                 AttributePlacement::SameLine => {

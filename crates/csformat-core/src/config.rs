@@ -620,23 +620,33 @@ impl Default for WrapOptions {
     }
 }
 
+/// ReSharper's `PlaceOnSameLineAsOwner` for attributes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SameLinePlacement {
+    #[default]
+    Never,
+    Always,
+    IfOwnerIsSingleLine,
+}
+
 /// ReSharper's `place_*` settings: whether simple constructs are kept on (or moved to) a
 /// single line, and where attributes and initializers go.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaceOptions {
     pub abstract_accessorholder_on_single_line: bool,
-    pub accessor_attribute_on_same_line: bool,
+    pub accessor_attribute_on_same_line: SameLinePlacement,
     pub accessor_with_attrs_holder_on_single_line: bool,
-    pub accessorholder_attribute_on_same_line: bool,
+    pub accessorholder_attribute_on_same_line: SameLinePlacement,
     pub comments_at_first_column: bool,
     pub constructor_initializer_on_same_line: bool,
     pub expr_accessor_on_single_line: bool,
     pub expr_method_on_single_line: bool,
     pub expr_property_on_single_line: bool,
-    pub field_attribute_on_same_line: bool,
+    pub field_attribute_on_same_line: SameLinePlacement,
     pub linq_into_on_new_line: bool,
-    pub method_attribute_on_same_line: bool,
-    pub record_field_attribute_on_same_line: bool,
+    pub method_attribute_on_same_line: SameLinePlacement,
+    pub record_field_attribute_on_same_line: SameLinePlacement,
     pub simple_accessor_on_single_line: bool,
     pub simple_accessorholder_on_single_line: bool,
     pub simple_anonymousmethod_on_single_line: bool,
@@ -649,7 +659,7 @@ pub struct PlaceOptions {
     pub simple_method_on_single_line: bool,
     pub simple_property_pattern_on_single_line: bool,
     pub simple_switch_expression_on_single_line: bool,
-    pub type_attribute_on_same_line: bool,
+    pub type_attribute_on_same_line: SameLinePlacement,
     pub type_constraints_on_same_line: bool,
 }
 
@@ -657,18 +667,18 @@ impl Default for PlaceOptions {
     fn default() -> Self {
         Self {
             abstract_accessorholder_on_single_line: true,
-            accessor_attribute_on_same_line: false,
+            accessor_attribute_on_same_line: SameLinePlacement::Never,
             accessor_with_attrs_holder_on_single_line: false,
-            accessorholder_attribute_on_same_line: false,
+            accessorholder_attribute_on_same_line: SameLinePlacement::IfOwnerIsSingleLine,
             comments_at_first_column: false,
             constructor_initializer_on_same_line: true,
             expr_accessor_on_single_line: true,
             expr_method_on_single_line: true,
             expr_property_on_single_line: true,
-            field_attribute_on_same_line: true,
+            field_attribute_on_same_line: SameLinePlacement::Always,
             linq_into_on_new_line: true,
-            method_attribute_on_same_line: false,
-            record_field_attribute_on_same_line: true,
+            method_attribute_on_same_line: SameLinePlacement::Never,
+            record_field_attribute_on_same_line: SameLinePlacement::IfOwnerIsSingleLine,
             simple_accessor_on_single_line: true,
             simple_accessorholder_on_single_line: false,
             simple_anonymousmethod_on_single_line: true,
@@ -681,7 +691,7 @@ impl Default for PlaceOptions {
             simple_method_on_single_line: false,
             simple_property_pattern_on_single_line: true,
             simple_switch_expression_on_single_line: false,
-            type_attribute_on_same_line: false,
+            type_attribute_on_same_line: SameLinePlacement::Never,
             type_constraints_on_same_line: true,
         }
     }
@@ -691,16 +701,39 @@ impl PlaceOptions {
     /// Apply a `place_*` setting by its suffix. Returns `None` when the suffix is not part
     /// of this family, otherwise whether the value parsed.
     fn set_resharper(&mut self, suffix: &str, value: &str) -> Option<bool> {
+        // The attribute keys are `PlaceOnSameLineAsOwner`, not booleans.
+        let attribute = match suffix {
+            "accessor_attribute_on_same_line" => Some(&mut self.accessor_attribute_on_same_line),
+            "accessorholder_attribute_on_same_line" => {
+                Some(&mut self.accessorholder_attribute_on_same_line)
+            }
+            "field_attribute_on_same_line" => Some(&mut self.field_attribute_on_same_line),
+            "method_attribute_on_same_line" => Some(&mut self.method_attribute_on_same_line),
+            "record_field_attribute_on_same_line" => {
+                Some(&mut self.record_field_attribute_on_same_line)
+            }
+            "type_attribute_on_same_line" => Some(&mut self.type_attribute_on_same_line),
+            _ => None,
+        };
+        if let Some(slot) = attribute {
+            *slot = match value.trim().to_ascii_lowercase().as_str() {
+                "never" => SameLinePlacement::Never,
+                "always" => SameLinePlacement::Always,
+                "if_owner_is_single_line" => SameLinePlacement::IfOwnerIsSingleLine,
+                other => match parse_bool(other) {
+                    Some(true) => SameLinePlacement::Always,
+                    Some(false) => SameLinePlacement::Never,
+                    None => return Some(false),
+                },
+            };
+            return Some(true);
+        }
         let slot = match suffix {
             "abstract_accessorholder_on_single_line" => {
                 &mut self.abstract_accessorholder_on_single_line
             }
-            "accessor_attribute_on_same_line" => &mut self.accessor_attribute_on_same_line,
             "accessor_with_attrs_holder_on_single_line" => {
                 &mut self.accessor_with_attrs_holder_on_single_line
-            }
-            "accessorholder_attribute_on_same_line" => {
-                &mut self.accessorholder_attribute_on_same_line
             }
             "comments_at_first_column" => &mut self.comments_at_first_column,
             "constructor_initializer_on_same_line" => {
@@ -709,10 +742,7 @@ impl PlaceOptions {
             "expr_accessor_on_single_line" => &mut self.expr_accessor_on_single_line,
             "expr_method_on_single_line" => &mut self.expr_method_on_single_line,
             "expr_property_on_single_line" => &mut self.expr_property_on_single_line,
-            "field_attribute_on_same_line" => &mut self.field_attribute_on_same_line,
             "linq_into_on_new_line" => &mut self.linq_into_on_new_line,
-            "method_attribute_on_same_line" => &mut self.method_attribute_on_same_line,
-            "record_field_attribute_on_same_line" => &mut self.record_field_attribute_on_same_line,
             "simple_accessor_on_single_line" => &mut self.simple_accessor_on_single_line,
             "simple_accessorholder_on_single_line" => {
                 &mut self.simple_accessorholder_on_single_line
@@ -735,7 +765,6 @@ impl PlaceOptions {
             "simple_switch_expression_on_single_line" => {
                 &mut self.simple_switch_expression_on_single_line
             }
-            "type_attribute_on_same_line" => &mut self.type_attribute_on_same_line,
             "type_constraints_on_same_line" => &mut self.type_constraints_on_same_line,
             _ => return None,
         };
