@@ -430,3 +430,13 @@ fn chop_if_long_chops_the_entries_of_a_moved_base_colon() {
 ";
     assert_eq!(format(source, &options), expected);
 }
+
+#[test]
+fn force_chop_compound_conditions_break_every_operand() {
+    let source = "class C\n{\n    void M(int a)\n    {\n        if (a > 0 && a < 10 && a != 5)\n        {\n            M(a);\n        }\n    }\n}\n";
+    let mut options = options();
+    assert_eq!(format(source, &options), source);
+    options.wrap.force_chop_compound_if = true;
+    let expected = "class C\n{\n    void M(int a)\n    {\n        if (a > 0 &&\n            a < 10 &&\n            a != 5)\n        {\n            M(a);\n        }\n    }\n}\n";
+    assert_eq!(format(source, &options), expected);
+}

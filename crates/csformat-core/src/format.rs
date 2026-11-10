@@ -1561,6 +1561,15 @@ impl<'a> Emitter<'a> {
                 }
             };
         }
+        // `stick_comment` (on by default) leaves a comment written at column zero there.
+        if self.options.stick_comment
+            && token.kind.is_comment()
+            && newlines > 0
+            && token.gap.tabs == 0
+            && token.gap.spaces == 0
+        {
+            return 0;
+        }
         if newlines > 0 {
             // A closing delimiter on its own line aligns with the line that opened it.
             if let Some(column) = closing_paren_indent {
@@ -2116,6 +2125,10 @@ impl<'a> Emitter<'a> {
         // collapse pass already checked that it fits.
         if self.layout.collapsed[i] {
             return false;
+        }
+        // `force_chop_compound_*` puts every operand of a compound condition on its own line.
+        if self.force_chop_operand(i) {
+            return true;
         }
         // Chopped lists and per-line element limits force breaks regardless of the
         // current line length.
@@ -2837,6 +2850,52 @@ impl<'a> Emitter<'a> {
     }
 
     /// Forced break points inside a chopped group or a max-elements-per-line group.
+    /// Whether `i` starts an operand of a compound `if`/`while`/`do` condition that
+    /// `force_chop_compound_*` asks to write one per line.
+    fn force_chop_operand(&self, i: usize) -> bool {
+        let wrap = &self.options.wrap;
+        if !(wrap.force_chop_compound_if
+            || wrap.force_chop_compound_while
+            || wrap.force_chop_compound_do)
+        {
+            return false;
+        }
+        let Some(prev) = self.prev_code(i) else {
+            return false;
+        };
+        if !matches!(self.tokens[prev].text(self.src), "&&" | "||") {
+            return false;
+        }
+        let open = self.layout.enclosing_open[i];
+        if open == usize::MAX || self.tokens[open].text(self.src) != "(" {
+            return false;
+        }
+        let enabled = match self.tokens[open].ast.paren {
+            ParenKind::If => wrap.force_chop_compound_if,
+            // `do ... while` shares the `while` paren kind.
+            ParenKind::While => wrap.force_chop_compound_while || wrap.force_chop_compound_do,
+            _ => false,
+        };
+        if !enabled {
+            return false;
+        }
+        let close = self.layout.match_close[open];
+        if close == usize::MAX {
+            return false;
+        }
+        let mut operands = 0u32;
+        let mut depth = 0i32;
+        for j in open + 1..close {
+            match self.tokens[j].text(self.src) {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => depth -= 1,
+                "&&" | "||" if depth == 0 => operands += 1,
+                _ => {}
+            }
+        }
+        operands >= 2
+    }
+
     fn group_break(&self, i: usize) -> bool {
         if self.chop_break(i) {
             return true;
@@ -3503,6 +3562,10 @@ impl<'a> Emitter<'a> {
             return gap.min(cap);
         }
 
+        // `special_else_if_treatment = false` makes `else` own an embedded `if` statement.
+        if pt == "else" && ct == "if" && !self.options.special_else_if_treatment {
+            return gap.max(1).min(cap);
+        }
         if pt == "}" && matches!(ct, "else" | "catch" | "finally") {
             let force = match ct {
                 "else" => self.options.newline.before_else,
@@ -3556,7 +3619,7 @@ impl<'a> Emitter<'a> {
             if prev.kind == TokenKind::LineComment {
                 return 1;
             }
-            let category = brace_category(token);
+            let category = brace_category(&self.layout, self.tokens, i);
             let force = u32::from(self.options.newline.before_open_brace.contains(category));
             if force > 0 {
                 // A blank line the author left before the brace is preserved.
@@ -4755,9 +4818,19 @@ fn colon_after(token: &Token, options: &FormatOptions) -> bool {
     }
 }
 
-fn brace_category(token: &Token) -> BraceCategory {
+fn brace_category(layout: &Layout, tokens: &[Token], i: usize) -> BraceCategory {
+    let token = &tokens[i];
+    // The accessor list of a property/indexer/event is the *accessor owner* brace;
+    // `accessor_declaration_braces` only covers the bodies of the accessors themselves.
     if token.ast.brace == BraceKind::AccessorList {
-        return BraceCategory::Accessors;
+        return BraceCategory::Properties;
+    }
+    // The block that opens a `case` section has its own brace option.
+    if token.ast.brace == BraceKind::Block && token.ast.switch_section_block_first {
+        let open = layout.enclosing_open[i];
+        if open != usize::MAX && tokens[open].ast.brace == BraceKind::SwitchStatement {
+            return BraceCategory::CaseBlocks;
+        }
     }
     if token.ast.brace == BraceKind::SwitchExpression {
         return BraceCategory::Control;

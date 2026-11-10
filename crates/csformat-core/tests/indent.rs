@@ -443,3 +443,42 @@ fn comment_after_left_brace_stays_when_allowed() {
         "class C\n{\n    void M(int a)\n    {\n        if (a > 0)\n        { // trailing\n            M(a);\n        }\n    }\n}\n",
     );
 }
+
+#[test]
+fn column_zero_comments_stick_unless_asked() {
+    let source = "class C\n{\n    void M(int a)\n    {\n        if (a > 0)\n        {\n        }\n\n// c\n        M(a);\n    }\n}\n";
+    check(source, &[], source);
+    check(
+        source,
+        &["stick_comment = false"],
+        "class C\n{\n    void M(int a)\n    {\n        if (a > 0)\n        {\n        }\n\n        // c\n        M(a);\n    }\n}\n",
+    );
+}
+
+#[test]
+fn else_if_is_split_when_special_treatment_is_off() {
+    let source = "class C\n{\n    void M(int a)\n    {\n        if (a > 0)\n        {\n        }\n        else if (a < 0)\n        {\n        }\n    }\n}\n";
+    check(source, &[], source);
+    check(
+        source,
+        &["special_else_if_treatment = false"],
+        "class C\n{\n    void M(int a)\n    {\n        if (a > 0)\n        {\n        }\n        else\n            if (a < 0)\n            {\n            }\n    }\n}\n",
+    );
+}
+
+#[test]
+fn accessor_owner_and_case_block_braces() {
+    let property = "class C\n{\n    int P\n    {\n        get { return 1; }\n    }\n}\n";
+    check(
+        property,
+        &["accessor_owner_declaration_braces = end_of_line"],
+        "class C\n{\n    int P {\n        get { return 1; }\n    }\n}\n",
+    );
+    let case = "class C\n{\n    void M(int a)\n    {\n        switch (a)\n        {\n            case 1:\n            {\n                M(a);\n                break;\n            }\n        }\n    }\n}\n";
+    check(case, &[], case);
+    check(
+        case,
+        &["case_block_braces = end_of_line"],
+        "class C\n{\n    void M(int a)\n    {\n        switch (a)\n        {\n            case 1: {\n                M(a);\n                break;\n            }\n        }\n    }\n}\n",
+    );
+}

@@ -113,6 +113,7 @@ pub enum BraceCategory {
     Initializers,
     Lambdas,
     LocalFunctions,
+    CaseBlocks,
 }
 
 impl BraceCategory {
@@ -124,7 +125,7 @@ impl BraceCategory {
 
 impl BraceCategories {
     pub const NONE: Self = Self(0);
-    pub const ALL: Self = Self((1 << 10) - 1);
+    pub const ALL: Self = Self((1 << 11) - 1);
 
     #[must_use]
     pub fn contains(self, category: BraceCategory) -> bool {
@@ -518,6 +519,12 @@ pub struct WrapOptions {
     pub before_binary_opsign: bool,
     /// `resharper_csharp_wrap_before_ternary_opsigns`.
     pub before_ternary_opsigns: bool,
+    /// `resharper_csharp_force_chop_compound_if_expression`.
+    pub force_chop_compound_if: bool,
+    /// `resharper_csharp_force_chop_compound_while_expression`.
+    pub force_chop_compound_while: bool,
+    /// `resharper_csharp_force_chop_compound_do_expression`.
+    pub force_chop_compound_do: bool,
     /// `resharper_csharp_wrap_before_extends_colon`.
     pub before_extends_colon: bool,
     /// `resharper_csharp_wrap_before_type_parameter_langle`.
@@ -592,6 +599,9 @@ impl Default for WrapOptions {
             before_eq: false,
             before_binary_opsign: false,
             before_ternary_opsigns: false,
+            force_chop_compound_if: false,
+            force_chop_compound_while: false,
+            force_chop_compound_do: false,
             before_extends_colon: false,
             before_type_parameter_langle: false,
             before_first_type_parameter_constraint: false,
@@ -1202,6 +1212,10 @@ pub struct FormatOptions {
     pub preserve_single_line_statements: bool,
     pub indent_case_contents: bool,
     pub indent_switch_labels: bool,
+    /// `resharper_csharp_stick_comment`: comments written at column zero stay there.
+    pub stick_comment: bool,
+    /// `resharper_csharp_special_else_if_treatment`: `else if` is one construct.
+    pub special_else_if_treatment: bool,
     pub indent_braces: bool,
     pub indent_labels: LabelIndent,
     /// `dotnet_sort_system_directives_first`; `None` means do not reorder usings at all.
@@ -1237,6 +1251,8 @@ impl Default for FormatOptions {
             preserve_single_line_statements: true,
             indent_case_contents: true,
             indent_switch_labels: true,
+            stick_comment: true,
+            special_else_if_treatment: true,
             indent_braces: false,
             indent_labels: LabelIndent::NoChange,
             sort_usings: None,
@@ -2073,7 +2089,7 @@ pub fn apply_key(
                 );
             }
         }
-        "tab_width" => set_usize(
+        "tab_width" | "resharper_tab_width" => set_usize(
             &mut options.tab_width,
             value_trim,
             &key,
@@ -2091,7 +2107,7 @@ pub fn apply_key(
                 &mut options.warnings,
             );
         }
-        "end_of_line" => set_enum(
+        "end_of_line" | "resharper_end_of_line" => set_enum(
             &mut options.end_of_line,
             value_trim,
             &key,
@@ -2105,7 +2121,7 @@ pub fn apply_key(
                 _ => None,
             },
         ),
-        "insert_final_newline" => set_bool(
+        "insert_final_newline" | "resharper_insert_final_newline" => set_bool(
             &mut options.insert_final_newline,
             value_trim,
             &key,
@@ -2113,7 +2129,7 @@ pub fn apply_key(
             applied,
             &mut options.warnings,
         ),
-        "trim_trailing_whitespace" => set_bool(
+        "trim_trailing_whitespace" | "resharper_trim_trailing_whitespace" => set_bool(
             &mut options.trim_trailing_whitespace,
             value_trim,
             &key,
@@ -2532,12 +2548,59 @@ pub fn apply_key(
             );
             options.space.max_attribute_length_for_same_line = n;
         }
+        // Comments written at column zero keep their column.
+        "resharper_stick_comment" | "resharper_dont_indent_comments_started_at_first_column" => {
+            set_bool(
+                &mut options.stick_comment,
+                value_trim,
+                &key,
+                path,
+                applied,
+                &mut options.warnings,
+            )
+        }
+        // `else if` is a single construct unless this is turned off.
+        "resharper_special_else_if_treatment" => set_bool(
+            &mut options.special_else_if_treatment,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        // Compound conditions are chopped one operand per line.
+        "resharper_force_chop_compound_if_expression" => set_bool(
+            &mut options.wrap.force_chop_compound_if,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_force_chop_compound_while_expression" => set_bool(
+            &mut options.wrap.force_chop_compound_while,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
+        "resharper_force_chop_compound_do_expression" => set_bool(
+            &mut options.wrap.force_chop_compound_do,
+            value_trim,
+            &key,
+            path,
+            applied,
+            &mut options.warnings,
+        ),
         // Per-category brace placement (`brace_style` family).
         "resharper_invocable_declaration_braces"
         | "resharper_type_declaration_braces"
         | "resharper_accessor_declaration_braces"
         | "resharper_anonymous_method_declaration_braces"
         | "resharper_initializer_braces"
+        | "resharper_accessor_owner_declaration_braces"
+        | "resharper_case_block_braces"
         | "resharper_other_braces" => {
             let category = match key.as_str() {
                 "resharper_invocable_declaration_braces" => BraceCategory::Methods,
@@ -2545,6 +2608,8 @@ pub fn apply_key(
                 "resharper_accessor_declaration_braces" => BraceCategory::Accessors,
                 "resharper_anonymous_method_declaration_braces" => BraceCategory::AnonymousMethods,
                 "resharper_initializer_braces" => BraceCategory::Initializers,
+                "resharper_accessor_owner_declaration_braces" => BraceCategory::Properties,
+                "resharper_case_block_braces" => BraceCategory::CaseBlocks,
                 _ => BraceCategory::Control,
             };
             match v.as_str() {
