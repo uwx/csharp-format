@@ -117,6 +117,9 @@ struct Layout {
     brace_inline: Vec<bool>,
     /// Whether the token sits inside (or closes) an inline block.
     inside_inline: Vec<bool>,
+    /// Whether the token belongs to a construct whose written line breaks are being
+    /// removed (`keep_existing_*_arrangement = false`).
+    collapsed: Vec<bool>,
     /// `true` for a `<` that opens a generic argument or type parameter list.
     generic_open: Vec<bool>,
     /// `true` for a `>`/`>>`/`>>>` that closes such a list.
@@ -160,6 +163,21 @@ impl Layout {
             }
         }
 
+        let mut match_close = vec![usize::MAX; n];
+        let mut delimiters: Vec<usize> = Vec::new();
+        for (i, token) in tokens.iter().enumerate() {
+            match token.text(source) {
+                "(" | "[" | "{" => delimiters.push(i),
+                ")" | "]" | "}" => {
+                    if let Some(open) = delimiters.pop() {
+                        match_close[open] = i;
+                        match_close[i] = open;
+                    }
+                }
+                _ => {}
+            }
+        }
+
         if options.preserve_single_line_blocks {
             for open in 0..n {
                 if tokens[open].text(source) != "{" {
@@ -196,10 +214,16 @@ impl Layout {
                     // layout, which would only widen the parse-error region.
                     BraceKind::Other | BraceKind::None => true,
                     BraceKind::AccessorList => accessor_list_is_auto(source, tokens, open, close),
-                    BraceKind::Block => matches!(
-                        owner,
-                        BraceOwner::Accessor | BraceOwner::Lambda | BraceOwner::AnonymousMethod
-                    ),
+                    // `keep_existing_enum_arrangement` / `keep_existing_embedded_block_
+                    // arrangement` ask for the author's arrangement to survive.
+                    BraceKind::EnumBody => options.keep.enum_arrangement,
+                    BraceKind::Block => {
+                        matches!(
+                            owner,
+                            BraceOwner::Accessor | BraceOwner::Lambda | BraceOwner::AnonymousMethod
+                        ) || (owner == BraceOwner::Control
+                            && options.keep.embedded_block_arrangement)
+                    }
                     _ => false,
                 };
                 brace_inline[open] = single_line && eligible;
@@ -220,6 +244,10 @@ impl Layout {
             match tokens[open].ast.brace {
                 BraceKind::Block => {
                     let owner = tokens[open].ast.brace_owner;
+                    // A kept embedded block arrangement wins over the `place_` option.
+                    if owner == BraceOwner::Control && options.keep.embedded_block_arrangement {
+                        continue;
+                    }
                     let collapse = match owner {
                         BraceOwner::Accessor => place.simple_accessor_on_single_line,
                         BraceOwner::AnonymousMethod => place.simple_anonymousmethod_on_single_line,
@@ -242,6 +270,63 @@ impl Layout {
                             || (simple && place.simple_accessorholder_on_single_line));
                 }
                 _ => {}
+            }
+        }
+
+        // `keep_existing_*_arrangement = false` pulls the written line breaks back out of a
+        // construct: initializers, patterns and argument/parameter lists are re-flowed onto
+        // one line when they hold nothing but simple tokens.
+        let mut collapsed = vec![false; n];
+        let keep = &options.keep;
+        // A construct is only re-flowed when the result fits on one line.
+        let limit = if options.wrap.enabled {
+            options.wrap.max_length.or(options.max_line_length)
+        } else {
+            None
+        };
+        for open in 0..n {
+            let ast = tokens[open].ast;
+            let collapse = match tokens[open].text(source) {
+                "{" => match ast.brace {
+                    BraceKind::Initializer => !keep.initializer_arrangement,
+                    BraceKind::Pattern => !keep.property_patterns_arrangement,
+                    _ => false,
+                },
+                "[" => {
+                    matches!(
+                        ast.bracket,
+                        BracketKind::ListPattern | BracketKind::CollectionExpression
+                    ) && !keep.list_patterns_arrangement
+                }
+                "(" => match ast.paren {
+                    ParenKind::ArgumentList => !keep.invocation_parens_arrangement,
+                    ParenKind::ParameterList | ParenKind::BracketedParameterList => {
+                        !keep.declaration_parens_arrangement
+                    }
+                    ParenKind::PrimaryConstructorParameterList => {
+                        !keep.declaration_parens_arrangement
+                            || !keep.primary_constructor_declaration_parens_arrangement
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !collapse {
+                continue;
+            }
+            let close = match_close[open];
+
+            if close == usize::MAX
+                || !range_collapsible(source, tokens, open, close)
+                || !fits_on_one_line(source, tokens, open, close, limit)
+            {
+                continue;
+            }
+            for slot in &mut collapsed[open..=close] {
+                *slot = true;
+            }
+            if tokens[open].text(source) == "{" {
+                brace_inline[open] = true;
             }
         }
 
@@ -396,7 +481,6 @@ impl Layout {
                 || before_linq;
         }
 
-        let mut match_close = vec![usize::MAX; n];
         let mut enclosing_open = vec![usize::MAX; n];
         let mut inside_generics = vec![false; n];
         let mut open_stack: Vec<usize> = Vec::new();
@@ -417,10 +501,7 @@ impl Layout {
             match text {
                 "(" | "[" | "{" => open_stack.push(i),
                 ")" | "]" | "}" => {
-                    if let Some(open) = open_stack.pop() {
-                        match_close[open] = i;
-                        match_close[i] = open;
-                    }
+                    open_stack.pop();
                 }
                 _ => {}
             }
@@ -457,6 +538,7 @@ impl Layout {
             brace_match,
             brace_inline,
             inside_inline,
+            collapsed,
             generic_open,
             generic_close,
             wrap_candidate,
@@ -505,6 +587,57 @@ fn block_is_simple(source: &str, tokens: &[Token], open: usize, close: usize) ->
         }
     }
     statements <= 1
+}
+
+/// Whether the whole range `open..=close` can be re-flowed onto one line: no comments,
+/// directives, statements or nested blocks.
+fn range_collapsible(source: &str, tokens: &[Token], open: usize, close: usize) -> bool {
+    for token in &tokens[open + 1..close] {
+        if token.kind.is_comment() || token.kind == TokenKind::Directive {
+            return false;
+        }
+        let text = token.text(source);
+        if text.contains('\n') || text == ";" {
+            return false;
+        }
+        if text == "{" && !matches!(token.ast.brace, BraceKind::Initializer | BraceKind::Pattern) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether `open..=close` would stay within `limit` columns when written on one line.
+/// The construct's own column is taken from the source; every token is separated by one
+/// space, which over-estimates a little and therefore errs on the safe side.
+fn fits_on_one_line(
+    source: &str,
+    tokens: &[Token],
+    open: usize,
+    close: usize,
+    limit: Option<usize>,
+) -> bool {
+    let Some(limit) = limit else {
+        return true;
+    };
+    let prefix = source
+        .get(..tokens[open].start)
+        .and_then(|head| head.rfind('\n'))
+        .map_or_else(
+            || tokens[open].start,
+            |newline| tokens[open].start - newline - 1,
+        );
+    let mut width = prefix;
+    for (offset, token) in tokens[open..=close].iter().enumerate() {
+        if offset > 0 {
+            width += 1;
+        }
+        width += token.text(source).chars().count();
+        if width > limit {
+            return false;
+        }
+    }
+    true
 }
 
 /// For an accessor list `open..close`: whether every accessor is body-less, and whether
@@ -1979,6 +2112,11 @@ impl<'a> Emitter<'a> {
     /// Whether token `i` should start a wrapped line because the *next* run of tokens
     /// would not fit on the current one.
     fn should_wrap(&self, i: usize) -> bool {
+        // A construct whose written breaks are being removed stays on one line; the
+        // collapse pass already checked that it fits.
+        if self.layout.collapsed[i] {
+            return false;
+        }
         // Chopped lists and per-line element limits force breaks regardless of the
         // current line length.
         if self.group_break(i) {
@@ -3024,7 +3162,16 @@ impl<'a> Emitter<'a> {
                 min = min.max(blank_lines.before_control_transfer_statements as u32);
             }
         }
-        if prev.ast.stmt_end != StmtKind::None && prev.ast.stmt_end != StmtKind::Block {
+        // A comment that closes a block (nothing but `}` follows) is not the start of a
+        // statement, so the separation rules for statements do not apply to it.
+        let trailing_comment = token.kind.is_comment()
+            && self
+                .next_code(i)
+                .is_some_and(|next| matches!(self.tokens[next].text(self.src), "}"));
+        if prev.ast.stmt_end != StmtKind::None
+            && prev.ast.stmt_end != StmtKind::Block
+            && !trailing_comment
+        {
             let kind = prev.ast.stmt_end;
             if kind == StmtKind::Switch || prev.ast.stmt_end_has_block {
                 min = min.max(blank_lines.after_block_statements as u32);
@@ -3217,6 +3364,11 @@ impl<'a> Emitter<'a> {
         let in_inline = self.layout.inside_inline[i];
         let cap = self.blank_cap_at(i);
 
+        // Constructs re-flowed by `keep_existing_*_arrangement = false` lose their breaks.
+        if self.layout.collapsed[i] {
+            return 0;
+        }
+
         // Region directives: `around_region` is the blank line before `#region`,
         // `inside_region` the padding just after `#region` and before `#endregion`.
         if ct.starts_with("#region") && pt != "{" {
@@ -3262,12 +3414,26 @@ impl<'a> Emitter<'a> {
             return 1;
         }
 
+        // `place_record_field_attribute_on_same_line = never` puts the attributes of a
+        // record primary-constructor parameter on their own line, which also expands the
+        // parameter list.
+        if self.options.place.record_field_attribute_on_same_line == SameLinePlacement::Never
+            && self.record_parameter_attribute(if ct == "[" { i } else { i - 1 })
+            && (ct == "[" || pt == "]")
+        {
+            return gap.max(1).min(cap);
+        }
+
         // Attribute sections follow ReSharper's per-member placement: fields, properties,
         // events and indexers keep them on the declaration line, while types, methods,
         // local functions and the rest put them on their own line. An XML doc comment
         // above the member always forces the attribute onto its own line.
         if pt == "]" && prev.ast.member_attribute && ct == "[" {
-            // Consecutive attribute sections on one line stay together.
+            // Consecutive attribute sections stay on one line unless
+            // `keep_existing_attribute_arrangement` asks for normalization.
+            if !self.options.keep.attribute_arrangement {
+                return 1;
+            }
         } else if pt == "]" && prev.ast.member_attribute {
             let start = self.attribute_run_start(i - 1);
             let too_long = self.attribute_list_long(start);
@@ -3513,6 +3679,17 @@ impl<'a> Emitter<'a> {
             return (self.options.blank_lines.inside_region as u32 + 1).min(cap);
         }
 
+        // `keep_existing_expr_member_arrangement = false` pulls the arrow of an expression
+        // body back onto the declaration line.
+        if ct == "=>"
+            && token.ast.has(flags::EXPRESSION_BODIED)
+            && !self.options.keep.expr_member_arrangement
+            && !in_inline
+            && !prev.kind.is_comment()
+        {
+            return 0;
+        }
+
         gap.min(cap)
     }
 
@@ -3537,6 +3714,43 @@ impl<'a> Emitter<'a> {
 
     fn is_member_start(&self, i: usize) -> bool {
         self.tokens[i].ast.member_start
+    }
+
+    /// Whether token `i` (the `[` or `]` of an attribute section) sits in the parameter
+    /// list of a record primary constructor.
+    fn record_parameter_attribute(&self, i: usize) -> bool {
+        // For the closing `]` the innermost delimiter is the section itself.
+        let index = if self.tokens[i].text(self.src) == "]" {
+            let open = self.layout.match_close[i];
+            if open == usize::MAX {
+                return false;
+            }
+            open
+        } else {
+            i
+        };
+        if self.tokens[index].ast.bracket != BracketKind::Attribute {
+            return false;
+        }
+        let open = self.layout.enclosing_open[index];
+        if open == usize::MAX
+            || !matches!(
+                self.tokens[open].ast.paren,
+                ParenKind::ParameterList | ParenKind::PrimaryConstructorParameterList
+            )
+        {
+            return false;
+        }
+        let mut j = open;
+        while j > 0 {
+            j -= 1;
+            match self.tokens[j].text(self.src) {
+                "record" => return true,
+                "{" | "}" | ";" => return false,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Whether the declaration whose attribute section ends just before `i` is preceded by
@@ -3996,6 +4210,17 @@ fn space_between(
         return options.space.before_comma;
     }
     if pt == "," {
+        // A trailing comma in a collection expression or list pattern sits tight against
+        // the closing bracket (`[1,]`), unlike `{ 1, }` where the brace spacing applies.
+        if ct == "]" {
+            let open = layout.enclosing_open[i];
+            let kind = if open != usize::MAX {
+                tokens[open].ast.bracket
+            } else {
+                BracketKind::None
+            };
+            return within_bracket_space(options, kind, options.space.between_square_brackets);
+        }
         // Multidimensional array ranks keep tight commas when empty (`new int[,]`) but
         // separate dimension sizes (`new int[7, 5]`).
         if prev.ast.comma == CommaKind::ArrayRank {

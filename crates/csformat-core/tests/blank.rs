@@ -167,3 +167,12 @@ fn a_bare_block_statement_gets_no_blank_after_its_brace() {
     let expected = "class A\n{\n    void M()\n    {\n        if (a > 0)\n        {\n            a = 1;\n        }\n\n        int z;\n    }\n}\n";
     check(source, &[], expected);
 }
+
+#[test]
+fn a_trailing_comment_gets_no_separating_blank() {
+    let source = "class A\n{\n    void M(int a)\n    {\n        switch (a)\n        {\n            case 1:\n                break;\n        }\n        // tail\n    }\n}\n";
+    check(source, &[], source);
+    let with_code = "class A\n{\n    void M(int a)\n    {\n        switch (a)\n        {\n            case 1:\n                break;\n        }\n        // c\n        M(a);\n    }\n}\n";
+    let expected = "class A\n{\n    void M(int a)\n    {\n        switch (a)\n        {\n            case 1:\n                break;\n        }\n\n        // c\n        M(a);\n    }\n}\n";
+    check(with_code, &[], expected);
+}
