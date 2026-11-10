@@ -620,6 +620,210 @@ impl Default for WrapOptions {
     }
 }
 
+/// ReSharper's `place_*` settings: whether simple constructs are kept on (or moved to) a
+/// single line, and where attributes and initializers go.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaceOptions {
+    pub abstract_accessorholder_on_single_line: bool,
+    pub accessor_attribute_on_same_line: bool,
+    pub accessor_with_attrs_holder_on_single_line: bool,
+    pub accessorholder_attribute_on_same_line: bool,
+    pub comments_at_first_column: bool,
+    pub constructor_initializer_on_same_line: bool,
+    pub expr_accessor_on_single_line: bool,
+    pub expr_method_on_single_line: bool,
+    pub expr_property_on_single_line: bool,
+    pub field_attribute_on_same_line: bool,
+    pub linq_into_on_new_line: bool,
+    pub method_attribute_on_same_line: bool,
+    pub record_field_attribute_on_same_line: bool,
+    pub simple_accessor_on_single_line: bool,
+    pub simple_accessorholder_on_single_line: bool,
+    pub simple_anonymousmethod_on_single_line: bool,
+    pub simple_case_statement_on_same_line: bool,
+    pub simple_embedded_block_on_same_line: bool,
+    pub simple_embedded_statement_on_same_line: bool,
+    pub simple_enum_on_single_line: bool,
+    pub simple_initializer_on_single_line: bool,
+    pub simple_list_pattern_on_single_line: bool,
+    pub simple_method_on_single_line: bool,
+    pub simple_property_pattern_on_single_line: bool,
+    pub simple_switch_expression_on_single_line: bool,
+    pub type_attribute_on_same_line: bool,
+    pub type_constraints_on_same_line: bool,
+}
+
+impl Default for PlaceOptions {
+    fn default() -> Self {
+        Self {
+            abstract_accessorholder_on_single_line: true,
+            accessor_attribute_on_same_line: false,
+            accessor_with_attrs_holder_on_single_line: false,
+            accessorholder_attribute_on_same_line: false,
+            comments_at_first_column: false,
+            constructor_initializer_on_same_line: true,
+            expr_accessor_on_single_line: true,
+            expr_method_on_single_line: true,
+            expr_property_on_single_line: true,
+            field_attribute_on_same_line: true,
+            linq_into_on_new_line: true,
+            method_attribute_on_same_line: false,
+            record_field_attribute_on_same_line: true,
+            simple_accessor_on_single_line: true,
+            simple_accessorholder_on_single_line: false,
+            simple_anonymousmethod_on_single_line: true,
+            simple_case_statement_on_same_line: false,
+            simple_embedded_block_on_same_line: false,
+            simple_embedded_statement_on_same_line: true,
+            simple_enum_on_single_line: false,
+            simple_initializer_on_single_line: true,
+            simple_list_pattern_on_single_line: true,
+            simple_method_on_single_line: false,
+            simple_property_pattern_on_single_line: true,
+            simple_switch_expression_on_single_line: false,
+            type_attribute_on_same_line: false,
+            type_constraints_on_same_line: true,
+        }
+    }
+}
+
+impl PlaceOptions {
+    /// Apply a `place_*` setting by its suffix. Returns `None` when the suffix is not part
+    /// of this family, otherwise whether the value parsed.
+    fn set_resharper(&mut self, suffix: &str, value: &str) -> Option<bool> {
+        let slot = match suffix {
+            "abstract_accessorholder_on_single_line" => {
+                &mut self.abstract_accessorholder_on_single_line
+            }
+            "accessor_attribute_on_same_line" => &mut self.accessor_attribute_on_same_line,
+            "accessor_with_attrs_holder_on_single_line" => {
+                &mut self.accessor_with_attrs_holder_on_single_line
+            }
+            "accessorholder_attribute_on_same_line" => {
+                &mut self.accessorholder_attribute_on_same_line
+            }
+            "comments_at_first_column" => &mut self.comments_at_first_column,
+            "constructor_initializer_on_same_line" => {
+                &mut self.constructor_initializer_on_same_line
+            }
+            "expr_accessor_on_single_line" => &mut self.expr_accessor_on_single_line,
+            "expr_method_on_single_line" => &mut self.expr_method_on_single_line,
+            "expr_property_on_single_line" => &mut self.expr_property_on_single_line,
+            "field_attribute_on_same_line" => &mut self.field_attribute_on_same_line,
+            "linq_into_on_new_line" => &mut self.linq_into_on_new_line,
+            "method_attribute_on_same_line" => &mut self.method_attribute_on_same_line,
+            "record_field_attribute_on_same_line" => &mut self.record_field_attribute_on_same_line,
+            "simple_accessor_on_single_line" => &mut self.simple_accessor_on_single_line,
+            "simple_accessorholder_on_single_line" => {
+                &mut self.simple_accessorholder_on_single_line
+            }
+            "simple_anonymousmethod_on_single_line" => {
+                &mut self.simple_anonymousmethod_on_single_line
+            }
+            "simple_case_statement_on_same_line" => &mut self.simple_case_statement_on_same_line,
+            "simple_embedded_block_on_same_line" => &mut self.simple_embedded_block_on_same_line,
+            "simple_embedded_statement_on_same_line" => {
+                &mut self.simple_embedded_statement_on_same_line
+            }
+            "simple_enum_on_single_line" => &mut self.simple_enum_on_single_line,
+            "simple_initializer_on_single_line" => &mut self.simple_initializer_on_single_line,
+            "simple_list_pattern_on_single_line" => &mut self.simple_list_pattern_on_single_line,
+            "simple_method_on_single_line" => &mut self.simple_method_on_single_line,
+            "simple_property_pattern_on_single_line" => {
+                &mut self.simple_property_pattern_on_single_line
+            }
+            "simple_switch_expression_on_single_line" => {
+                &mut self.simple_switch_expression_on_single_line
+            }
+            "type_attribute_on_same_line" => &mut self.type_attribute_on_same_line,
+            "type_constraints_on_same_line" => &mut self.type_constraints_on_same_line,
+            _ => return None,
+        };
+        // Several of these are `PlaceOnSameLineAsOwner` in ReSharper; we collapse the
+        // three-state value onto a boolean ("place it on the same line").
+        let flag = match value.trim().to_ascii_lowercase().as_str() {
+            "never" => false,
+            "always" | "if_owner_is_single_line" => true,
+            other => match parse_bool(other) {
+                Some(flag) => flag,
+                None => return Some(false),
+            },
+        };
+        *slot = flag;
+        Some(true)
+    }
+}
+
+/// ReSharper's `keep_existing_*_arrangement` settings: whether the author's line breaks are
+/// preserved for that construct.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeepOptions {
+    pub attribute_arrangement: bool,
+    pub declaration_block_arrangement: bool,
+    pub declaration_parens_arrangement: bool,
+    pub embedded_arrangement: bool,
+    pub embedded_block_arrangement: bool,
+    pub enum_arrangement: bool,
+    pub expr_member_arrangement: bool,
+    pub initializer_arrangement: bool,
+    pub invocation_parens_arrangement: bool,
+    pub list_patterns_arrangement: bool,
+    pub primary_constructor_declaration_parens_arrangement: bool,
+    pub property_patterns_arrangement: bool,
+    pub switch_expression_arrangement: bool,
+    pub user_linebreaks: bool,
+}
+
+impl Default for KeepOptions {
+    fn default() -> Self {
+        Self {
+            attribute_arrangement: false,
+            declaration_block_arrangement: false,
+            declaration_parens_arrangement: true,
+            embedded_arrangement: true,
+            embedded_block_arrangement: false,
+            enum_arrangement: false,
+            expr_member_arrangement: true,
+            initializer_arrangement: true,
+            invocation_parens_arrangement: true,
+            list_patterns_arrangement: true,
+            primary_constructor_declaration_parens_arrangement: true,
+            property_patterns_arrangement: true,
+            switch_expression_arrangement: true,
+            user_linebreaks: false,
+        }
+    }
+}
+
+impl KeepOptions {
+    fn set_resharper(&mut self, suffix: &str, value: &str) -> Option<bool> {
+        let Some(flag) = parse_bool(value) else {
+            return Some(false);
+        };
+        let slot = match suffix {
+            "attribute_arrangement" => &mut self.attribute_arrangement,
+            "declaration_block_arrangement" => &mut self.declaration_block_arrangement,
+            "declaration_parens_arrangement" => &mut self.declaration_parens_arrangement,
+            "embedded_arrangement" => &mut self.embedded_arrangement,
+            "embedded_block_arrangement" => &mut self.embedded_block_arrangement,
+            "enum_arrangement" => &mut self.enum_arrangement,
+            "expr_member_arrangement" => &mut self.expr_member_arrangement,
+            "initializer_arrangement" => &mut self.initializer_arrangement,
+            "invocation_parens_arrangement" => &mut self.invocation_parens_arrangement,
+            "list_patterns_arrangement" => &mut self.list_patterns_arrangement,
+            "primary_constructor_declaration_parens_arrangement" => {
+                &mut self.primary_constructor_declaration_parens_arrangement
+            }
+            "property_patterns_arrangement" => &mut self.property_patterns_arrangement,
+            "switch_expression_arrangement" => &mut self.switch_expression_arrangement,
+            "user_linebreaks" => &mut self.user_linebreaks,
+            _ => return None,
+        };
+        *slot = flag;
+        Some(true)
+    }
+}
+
 /// ReSharper's `int_align_*` settings: tabular alignment of adjacent lines (the "Align
 /// Code" feature applied during reformatting).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -959,6 +1163,8 @@ pub struct FormatOptions {
     pub indent: IndentOptions,
     pub align: AlignOptions,
     pub int_align: IntAlignOptions,
+    pub place: PlaceOptions,
+    pub keep: KeepOptions,
     pub wrap: WrapOptions,
     pub preserve_single_line_blocks: bool,
     pub preserve_single_line_statements: bool,
@@ -992,6 +1198,8 @@ impl Default for FormatOptions {
             indent: IndentOptions::default(),
             align: AlignOptions::default(),
             int_align: IntAlignOptions::default(),
+            place: PlaceOptions::default(),
+            keep: KeepOptions::default(),
             wrap: WrapOptions::default(),
             preserve_single_line_blocks: true,
             preserve_single_line_statements: true,
@@ -1680,6 +1888,35 @@ pub fn apply_key(
             value: value_trim.to_owned(),
         });
     };
+
+    if let Some(rest) = key.strip_prefix("resharper_place_") {
+        match options.place.set_resharper(rest, value_trim) {
+            Some(true) => push(&key),
+            Some(false) => options.warnings.push(format!(
+                "{}: invalid value for {key}: {value_trim:?}",
+                path.display()
+            )),
+            None => options.warnings.push(format!(
+                "{}: unsupported placement option {key}",
+                path.display()
+            )),
+        }
+        return;
+    }
+
+    if let Some(rest) = key.strip_prefix("resharper_keep_existing_") {
+        match options.keep.set_resharper(rest, value_trim) {
+            Some(true) => push(&key),
+            Some(false) => options.warnings.push(format!(
+                "{}: invalid value for {key}: {value_trim:?}",
+                path.display()
+            )),
+            None => options
+                .warnings
+                .push(format!("{}: unsupported keep option {key}", path.display())),
+        }
+        return;
+    }
 
     if let Some(rest) = key.strip_prefix("resharper_int_align_") {
         match options.int_align.set_resharper(rest, value_trim) {

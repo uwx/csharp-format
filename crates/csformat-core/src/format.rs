@@ -205,6 +205,44 @@ impl Layout {
             }
         }
 
+        // `place_*_on_single_line` both joins simple constructs written over several lines
+        // and expands the ones the options turn off.
+        let place = &options.place;
+        for open in 0..n {
+            if tokens[open].text(source) != "{" {
+                continue;
+            }
+            let close = brace_match[open];
+            if close == usize::MAX {
+                continue;
+            }
+            match tokens[open].ast.brace {
+                BraceKind::Block => {
+                    let owner = tokens[open].ast.brace_owner;
+                    let collapse = match owner {
+                        BraceOwner::Accessor => place.simple_accessor_on_single_line,
+                        BraceOwner::AnonymousMethod => place.simple_anonymousmethod_on_single_line,
+                        BraceOwner::Method
+                        | BraceOwner::Constructor
+                        | BraceOwner::Destructor
+                        | BraceOwner::Operator
+                        | BraceOwner::LocalFunction => place.simple_method_on_single_line,
+                        // Lambdas and control-flow bodies keep the author's arrangement.
+                        _ => continue,
+                    };
+                    brace_inline[open] = collapse && block_is_simple(source, tokens, open, close);
+                }
+                BraceKind::AccessorList => {
+                    let (bodyless, simple) =
+                        accessor_list_flags(source, tokens, open, close, &brace_match);
+                    brace_inline[open] = (bodyless || simple)
+                        && ((bodyless && place.abstract_accessorholder_on_single_line)
+                            || (simple && place.simple_accessorholder_on_single_line));
+                }
+                _ => {}
+            }
+        }
+
         let mut inline_depth = 0usize;
         for (i, token) in tokens.iter().enumerate() {
             let text = token.text(source);
@@ -442,6 +480,57 @@ impl Layout {
 /// True when every accessor in an accessor list has a semicolon body (an auto-property).
 ///
 /// `{ get; set; }` is kept on one line; `{ get => x; set { } }` is expanded.
+/// Whether the block `open..close` holds at most one simple statement: no comments, no
+/// directives and no nested blocks.
+fn block_is_simple(source: &str, tokens: &[Token], open: usize, close: usize) -> bool {
+    let mut statements = 0usize;
+    let mut depth = 0i32;
+    for token in &tokens[open + 1..close] {
+        if token.kind.is_comment() || token.kind == TokenKind::Directive {
+            return false;
+        }
+        match token.text(source) {
+            "{" => return false,
+            ";" if depth == 0 => statements += 1,
+            "(" | "[" => depth += 1,
+            ")" | "]" => depth -= 1,
+            _ => {}
+        }
+    }
+    statements <= 1
+}
+
+/// For an accessor list `open..close`: whether every accessor is body-less, and whether
+/// every accessor body is a simple block.
+fn accessor_list_flags(
+    source: &str,
+    tokens: &[Token],
+    open: usize,
+    close: usize,
+    brace_match: &[usize],
+) -> (bool, bool) {
+    let mut bodyless = true;
+    let mut simple = true;
+    let mut j = open + 1;
+    while j < close {
+        if tokens[j].text(source) == "{" {
+            bodyless = false;
+            let body_close = brace_match[j];
+            if body_close == usize::MAX || body_close > close {
+                simple = false;
+                break;
+            }
+            if !block_is_simple(source, tokens, j, body_close) {
+                simple = false;
+            }
+            j = body_close + 1;
+            continue;
+        }
+        j += 1;
+    }
+    (bodyless, simple)
+}
+
 fn accessor_list_is_auto(source: &str, tokens: &[Token], open: usize, close: usize) -> bool {
     tokens[open + 1..close]
         .iter()
@@ -3249,7 +3338,7 @@ impl<'a> Emitter<'a> {
 
         if ct == "{" {
             if self.layout.brace_inline[i] {
-                return gap;
+                return 0;
             }
             if prev.kind == TokenKind::LineComment {
                 return 1;
@@ -3268,7 +3357,7 @@ impl<'a> Emitter<'a> {
         // the cap here.
         if ct == "}" {
             if in_inline {
-                return gap;
+                return 0;
             }
             if pt == "{" {
                 return gap.max(1).min(cap);
@@ -3278,7 +3367,7 @@ impl<'a> Emitter<'a> {
 
         if pt == "{" {
             if in_inline {
-                return gap;
+                return 0;
             }
             if token.kind == TokenKind::BlockComment && gap == 0 {
                 return 0;

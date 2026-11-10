@@ -292,3 +292,70 @@ fn per_category_brace_placement() {
         "namespace N {\n    class C {\n        void M()\n        {\n        }\n    }\n}\n",
     );
 }
+
+#[test]
+fn simple_accessor_bodies_collapse_or_expand() {
+    let collapsed = "class C\n{\n    int P\n    {\n        get { return 1; }\n    }\n}\n";
+    check(collapsed, &[], collapsed);
+    check(
+        collapsed,
+        &["place_simple_accessor_on_single_line = false"],
+        "class C\n{\n    int P\n    {\n        get\n        {\n            return 1;\n        }\n    }\n}\n",
+    );
+    let expanded = "class C\n{\n    int P\n    {\n        get\n        {\n            return 1;\n        }\n    }\n}\n";
+    check(expanded, &[], collapsed);
+}
+
+#[test]
+fn bodyless_accessor_holders_are_joined() {
+    let source = "class C\n{\n    int P\n    {\n        get;\n    }\n}\n";
+    check(source, &[], "class C\n{\n    int P { get; }\n}\n");
+    check(
+        source,
+        &["place_abstract_accessorholder_on_single_line = false"],
+        source,
+    );
+}
+
+#[test]
+fn simple_accessor_holders_join_when_asked() {
+    let source = "class C\n{\n    int Q { get { return 1; } }\n}\n";
+    check(
+        source,
+        &[],
+        "class C\n{\n    int Q\n    {\n        get { return 1; }\n    }\n}\n",
+    );
+    check(
+        source,
+        &["place_simple_accessorholder_on_single_line = true"],
+        source,
+    );
+}
+
+#[test]
+fn simple_anonymous_methods_collapse_or_expand() {
+    let with_body = "class C\n{\n    void M()\n    {\n        System.Action f = delegate\n        {\n            M();\n        };\n    }\n}\n";
+    check(
+        with_body,
+        &[],
+        "class C\n{\n    void M()\n    {\n        System.Action f = delegate { M(); };\n    }\n}\n",
+    );
+    let inline =
+        "class C\n{\n    void M()\n    {\n        System.Action f = delegate { M(); };\n    }\n}\n";
+    check(
+        inline,
+        &["place_simple_anonymousmethod_on_single_line = false"],
+        with_body,
+    );
+}
+
+#[test]
+fn simple_method_bodies_collapse_when_asked() {
+    let source = "class C\n{\n    void M()\n    {\n        P = 1;\n    }\n\n    int P;\n}\n";
+    check(source, &[], source);
+    check(
+        source,
+        &["place_simple_method_on_single_line = true"],
+        "class C\n{\n    void M() { P = 1; }\n\n    int P;\n}\n",
+    );
+}
