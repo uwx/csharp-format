@@ -9,7 +9,7 @@ use crate::config::{BraceCategory, EndOfLine, FormatOptions, IndentUnit, WrapSty
 use crate::lexer::{Token, TokenKind, lex};
 use crate::syntax::{
     AngleKind, AttributePlacement, BraceKind, BraceOwner, BracketKind, ColonKind, CommaKind,
-    OperatorKind, ParenKind, SemicolonKind, Syntax, flags,
+    DeclKind, OperatorKind, ParenKind, SemicolonKind, StmtKind, Syntax, flags, should_separate,
 };
 
 /// Placeholder for a line break inserted by the emitter.
@@ -124,6 +124,8 @@ struct Layout {
     match_close: Vec<usize>,
     /// Innermost enclosing `(`, `[` or `{` for every token (`usize::MAX` at top level).
     enclosing_open: Vec<usize>,
+    /// Whether the token sits inside a generic argument or type parameter list.
+    inside_generics: Vec<bool>,
     /// For every token, the index of the `:` introducing its base list (`usize::MAX` when
     /// the token is not part of one).
     base_owner: Vec<usize>,
@@ -354,10 +356,22 @@ impl Layout {
 
         let mut match_close = vec![usize::MAX; n];
         let mut enclosing_open = vec![usize::MAX; n];
+        let mut inside_generics = vec![false; n];
         let mut open_stack: Vec<usize> = Vec::new();
+        let mut angle_depth = 0usize;
         for (i, token) in tokens.iter().enumerate() {
             let text = token.text(source);
             enclosing_open[i] = open_stack.last().copied().unwrap_or(usize::MAX);
+            if generic_open[i] {
+                angle_depth += 1;
+                inside_generics[i] = true;
+            } else if generic_close[i] {
+                inside_generics[i] = angle_depth > 0;
+                let closed = text.chars().filter(|c| *c == '>').count().max(1);
+                angle_depth = angle_depth.saturating_sub(closed);
+            } else {
+                inside_generics[i] = angle_depth > 0;
+            }
             match text {
                 "(" | "[" | "{" => open_stack.push(i),
                 ")" | "]" | "}" => {
@@ -406,6 +420,7 @@ impl Layout {
             wrap_candidate,
             match_close,
             enclosing_open,
+            inside_generics,
             base_owner,
             decl_owner,
             space_before: Vec::new(),
@@ -874,20 +889,84 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Maximum newlines allowed between two tokens at position `i`. ReSharper keeps at most
-    /// `keep_in_declarations` blank lines between type members and `keep_in_code` inside
-    /// method bodies.
-    fn blank_cap_at(&self, _i: usize) -> u32 {
-        let declarations = matches!(
+    /// Whether the emitter is currently between declarations (file, type, namespace or
+    /// enum body) rather than inside a method or statement block.
+    fn in_declaration_body(&self) -> bool {
+        matches!(
             self.stack.last().map(|frame| frame.kind),
             None | Some(BraceKind::TypeBody | BraceKind::NamespaceBody | BraceKind::EnumBody)
-        );
-        let keep = if declarations {
-            self.options.blank_lines.keep_in_declarations
+        )
+    }
+
+    /// Maximum number of blank lines allowed before token `i`. ReSharper keeps at most
+    /// `keep_blank_lines_in_declarations` blank lines between type members and
+    /// `keep_blank_lines_in_code` inside method bodies, but always removes blank lines
+    /// directly next to a block brace unless `remove_blank_lines_near_braces_*` is off.
+    fn blank_max_blanks(&self, i: usize) -> u32 {
+        let prev = &self.tokens[i - 1];
+        let pt = prev.text(self.src);
+        let ct = self.tokens[i].text(self.src);
+        let blank_lines = &self.options.blank_lines;
+        let in_decl = self.in_declaration_body();
+        let keep = if in_decl {
+            blank_lines.keep_in_declarations
         } else {
-            self.options.blank_lines.keep_in_code
+            blank_lines.keep_in_code
         };
-        keep as u32 + 1
+        let remove = if in_decl {
+            blank_lines.remove_near_braces_in_declarations
+        } else {
+            blank_lines.remove_near_braces_in_code
+        };
+        // Blank lines between consecutive using directives are always removed.
+        if self.tokens[i].ast.using_start
+            && self
+                .prev_code(i)
+                .is_some_and(|prev| self.tokens[prev].ast.using_directive)
+        {
+            return 0;
+        }
+        // Parenthesised lists, array-rank and element-access brackets and generic
+        // argument lists never contain blank lines in ReSharper's output.
+        if self.inside_element_list(i) {
+            return 0;
+        }
+        // A blank line directly inside a brace-like delimiter is removed unless the
+        // matching `remove_blank_lines_near_braces_*` option is off. Collection
+        // expressions and list patterns count as braces here; blank lines between their
+        // elements are kept.
+        if remove && matches!(pt, "{" | "[") {
+            return 0;
+        }
+        if remove && matches!(ct, "}" | "]") {
+            return 0;
+        }
+        keep as u32
+    }
+
+    /// Whether token `i` sits inside a parenthesised, bracketed or generic element list
+    /// rather than inside a brace-delimited block.
+    fn inside_element_list(&self, i: usize) -> bool {
+        if self.layout.inside_generics[i] {
+            return true;
+        }
+        let open = self.layout.enclosing_open[i];
+        if open == usize::MAX {
+            return false;
+        }
+        match self.tokens[open].text(self.src) {
+            "(" => true,
+            "[" => !matches!(
+                self.tokens[open].ast.bracket,
+                BracketKind::CollectionExpression | BracketKind::ListPattern
+            ),
+            _ => false,
+        }
+    }
+
+    /// Maximum line breaks (blank lines plus the mandatory one) before token `i`.
+    fn blank_cap_at(&self, i: usize) -> u32 {
+        self.blank_max_blanks(i) + 1
     }
 
     /// Width of one indentation level in columns.
@@ -2153,7 +2232,393 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    /// Line breaks before token `i`: the structural layout decision from
+    /// [`Self::base_newlines_before`] clamped to ReSharper's blank-line limits.
+    ///
+    /// ReSharper's `BlankLineStage` computes `min` and `max` blank-line counts for every gap
+    /// (from the option rules and the enclosing body) and clamps the gap to
+    /// `[min, max]`; a minimum wins over a smaller maximum.
     fn newlines_before(&self, i: usize) -> u32 {
+        let base = self.base_newlines_before(i);
+        if base == 0 {
+            return 0;
+        }
+        let (min, max) = self.blank_bounds(i);
+        let max = max.max(min);
+        base.max(min + 1).min(max + 1)
+    }
+
+    /// `(min, max)` blank lines ReSharper allows before token `i`.
+    fn blank_bounds(&self, i: usize) -> (u32, u32) {
+        let token = &self.tokens[i];
+        let prev = &self.tokens[i - 1];
+        let pt = prev.text(self.src);
+        let ct = token.text(self.src);
+        let blank_lines = &self.options.blank_lines;
+        let max = self.blank_max_blanks(i);
+
+        // Region padding: `around_region` is a minimum, `inside_region` is exact.
+        let after_region_start =
+            prev.kind == TokenKind::Directive && (pt == "#region" || pt.starts_with("#region "));
+        if ct.starts_with("#endregion") || after_region_start {
+            let inside = blank_lines.inside_region as u32;
+            return (inside, inside);
+        }
+        if ct.starts_with("#region") || (prev.kind == TokenKind::Directive && pt == "#endregion") {
+            let around = blank_lines.around_region as u32;
+            return (around, max.max(around));
+        }
+
+        // Padding inside a type or namespace body is its own option, independent of the
+        // near-brace removal.
+        if self.in_declaration_body() && (pt == "{" || ct == "}") {
+            let inside = match self.stack.last().map(|frame| frame.kind) {
+                Some(BraceKind::NamespaceBody) => blank_lines.inside_namespace as u32,
+                Some(BraceKind::TypeBody | BraceKind::EnumBody) => blank_lines.inside_type as u32,
+                _ => 0,
+            };
+            if inside > 0 {
+                return (inside, max.max(inside));
+            }
+        }
+
+        // `CSharpFormattingStage.VisitUsingList`: consecutive `using` directives are
+        // written with exactly one line break, or `blank_lines_between_using_groups + 1`
+        // when they fall into different groups.
+        if token.ast.using_start {
+            if let Some(prev_code) = self.prev_code(i) {
+                if self.tokens[prev_code].text(self.src) == ";"
+                    && self.tokens[prev_code].ast.using_directive
+                {
+                    let blank = self.using_group_blanks(prev_code, i);
+                    return (blank, blank);
+                }
+            }
+        }
+        // `blank_lines_after_file_scoped_namespace_directive` is exact.
+        if prev.text(self.src) == ";" && prev.ast.decl_end == DeclKind::Namespace {
+            let after = blank_lines.after_file_scoped_namespace_directive as u32;
+            return (after, after);
+        }
+
+        // No blank line is inserted directly next to a block brace.
+        if pt == "{" || ct == "}" {
+            return (0, max);
+        }
+        (self.blank_min_blanks(i), max)
+    }
+
+    /// Blank lines ReSharper puts between two `using` directives: none inside a group,
+    /// `blank_lines_between_using_groups` otherwise.
+    fn using_group_blanks(&self, prev_end: usize, next_start: usize) -> u32 {
+        let groups = self.options.blank_lines.between_using_groups as u32;
+        match (self.using_key(prev_end), self.using_key(next_start)) {
+            (Some(left), Some(right)) => {
+                // Aliases group with each other; symbol directives group when their
+                // `static` flag matches and they share the first namespace segment.
+                let same_group = if left.0 && right.0 {
+                    true
+                } else if !left.0 && !right.0 {
+                    left.1 == right.1 && left.2 == right.2
+                } else {
+                    false
+                };
+                if same_group { 0 } else { groups }
+            }
+            _ => 0,
+        }
+    }
+
+    /// `(is_alias, is_static, first segment of the imported name)` for the `using`
+    /// directive that contains token `pos`.
+    fn using_key(&self, pos: usize) -> Option<(bool, bool, String)> {
+        let mut start = pos;
+        loop {
+            if self.tokens[start].ast.using_start {
+                break;
+            }
+            if start == 0 {
+                return None;
+            }
+            start -= 1;
+        }
+        let mut end = start;
+        while end + 1 < self.tokens.len() {
+            end += 1;
+            if self.tokens[end].text(self.src) == ";" {
+                break;
+            }
+        }
+        let mut alias = false;
+        let mut is_static = false;
+        let mut first = String::new();
+        let mut seen_name = false;
+        for k in start + 1..=end {
+            let token = &self.tokens[k];
+            if token.kind.is_comment() {
+                continue;
+            }
+            let text = token.text(self.src);
+            match text {
+                "using" | "global" => {}
+                "static" => is_static = true,
+                "=" => alias = true,
+                ";" => break,
+                _ => {
+                    if !seen_name {
+                        seen_name = true;
+                        first.push_str(text);
+                    }
+                }
+            }
+        }
+        Some((alias, is_static, first))
+    }
+
+    /// Minimum number of blank lines ReSharper inserts before token `i`.
+    ///
+    /// Mirrors the `BlankLinesAroundNodeRule` registrations in
+    /// `CSharpFormatterInfoProviderBase.BlankLines()`: every member kind, statement kind and
+    /// switch section carries a `blank_lines_*` option that forces blank lines around it.
+    fn blank_min_blanks(&self, i: usize) -> u32 {
+        let token = &self.tokens[i];
+        let prev = &self.tokens[i - 1];
+        let ct = token.text(self.src);
+        let blank_lines = &self.options.blank_lines;
+        let mut min = 0u32;
+
+        // Members and other declaration units: `blank_lines_around_*`. A member whose
+        // leading comment sits on its own line counts as multi-line, and the blank line
+        // goes above the comment (see the comment branch below).
+        if token.ast.decl_start != DeclKind::None
+            && !prev.kind.is_comment()
+            && prev.kind != TokenKind::Directive
+        {
+            // A member whose attributes move onto their own line is multi-line even when
+            // the source kept it on one line.
+            let multiline = self.member_multiline(i)
+                || token.ast.decl_start == DeclKind::Type
+                || (ct == "["
+                    && token.ast.member_attribute
+                    && (token.ast.attribute == AttributePlacement::OwnLine
+                        || self.attribute_list_long(i)));
+            min = min.max(self.around_decl_min(token.ast.decl_start, multiline));
+        }
+        if token.kind.is_comment() {
+            if let Some(next) = self.next_code(i) {
+                let decl = &self.tokens[next];
+                if decl.ast.member_start
+                    && decl.ast.decl_start != DeclKind::None
+                    && self.declaration_comment_start(next) == Some(i)
+                {
+                    min = min.max(self.around_decl_min(decl.ast.decl_start, true));
+                }
+            }
+        }
+        if prev.ast.decl_end != DeclKind::None && token.kind != TokenKind::Directive {
+            min = min.max(self.around_decl_min(prev.ast.decl_end, self.decl_end_multiline(i - 1)));
+        }
+
+        // Statements that own a block, span several lines, or transfer control.
+        // A bare block statement is not a "block statement" for ReSharper: it gets no
+        // separating blank lines of its own.
+        if token.ast.stmt_start != StmtKind::None && token.ast.stmt_start != StmtKind::Block {
+            let kind = token.ast.stmt_start;
+            if kind == StmtKind::Switch || token.ast.stmt_start_has_block {
+                min = min.max(blank_lines.before_block_statements as u32);
+            }
+            if token.ast.stmt_start_multiline || token.ast.stmt_start_has_block {
+                min = min.max(blank_lines.before_multiline_statements as u32);
+            }
+            if token.ast.stmt_start_control != 0 && self.separate_before(i) {
+                min = min.max(blank_lines.before_control_transfer_statements as u32);
+            }
+        }
+        if prev.ast.stmt_end != StmtKind::None && prev.ast.stmt_end != StmtKind::Block {
+            let kind = prev.ast.stmt_end;
+            if kind == StmtKind::Switch || prev.ast.stmt_end_has_block {
+                min = min.max(blank_lines.after_block_statements as u32);
+            }
+            if prev.ast.stmt_end_multiline || prev.ast.stmt_end_has_block {
+                min = min.max(blank_lines.after_multiline_statements as u32);
+            }
+            if prev.ast.stmt_end_control != 0 && self.separate_after(i) {
+                min = min.max(blank_lines.after_control_transfer_statements as u32);
+            }
+        }
+
+        // Switch sections: blank lines before/after the labels and around whole sections.
+        if matches!(ct, "case" | "default") && token.ast.switch_section {
+            min = min.max(blank_lines.before_case as u32);
+            if !token.ast.switch_section_inline {
+                min = min.max(blank_lines.around_multiline_case_section as u32);
+            }
+            if token.ast.switch_section_block_first {
+                min = min.max(blank_lines.around_block_case_section as u32);
+            }
+        }
+        if prev.ast.switch_section && !token.ast.switch_section {
+            if !prev.ast.switch_section_inline {
+                min = min.max(blank_lines.around_multiline_case_section as u32);
+            }
+            if prev.ast.switch_section_block_last {
+                min = min.max(blank_lines.around_block_case_section as u32);
+            }
+        }
+        if prev.ast.colon == ColonKind::SwitchLabel
+            && !self
+                .next_code(i)
+                .is_some_and(|next| matches!(self.tokens[next].text(self.src), "case" | "default"))
+        {
+            min = min.max(blank_lines.after_case as u32);
+        }
+
+        // Blank lines the author left above a single-line comment.
+        if token.kind == TokenKind::LineComment
+            && !self.tokens[i].text(self.src).starts_with("////")
+        {
+            min = min.max(blank_lines.before_single_line_comment as u32);
+        }
+
+        // The first code token after the file's leading comment block.
+        if prev.kind.is_comment() && self.leading_comment_run(i - 1) {
+            min = min.max(blank_lines.after_start_comment as u32);
+        }
+
+        // The first non-using token after the last `using` of a using list.
+        if prev.ast.using_end && ct != "#endif" {
+            min = min.max(blank_lines.after_using_list as u32);
+        }
+
+        min
+    }
+
+    /// Blank lines forced by `blank_lines_around_*` for a declaration of `kind`.
+    fn around_decl_min(&self, kind: DeclKind, multiline: bool) -> u32 {
+        let blank_lines = &self.options.blank_lines;
+        let value = match kind {
+            DeclKind::None => return 0,
+            DeclKind::Namespace => blank_lines.around_namespace,
+            DeclKind::Type => {
+                if multiline {
+                    blank_lines.around_type
+                } else {
+                    blank_lines.around_single_line_type
+                }
+            }
+            DeclKind::Field => {
+                if multiline {
+                    blank_lines.around_field
+                } else {
+                    blank_lines.around_single_line_field
+                }
+            }
+            DeclKind::Property => {
+                if multiline {
+                    blank_lines.around_property
+                } else {
+                    blank_lines.around_single_line_property
+                }
+            }
+            DeclKind::AutoProperty => {
+                if multiline {
+                    blank_lines.around_auto_property
+                } else {
+                    blank_lines.around_single_line_auto_property
+                }
+            }
+            DeclKind::Accessor => {
+                if multiline {
+                    blank_lines.around_accessor
+                } else {
+                    blank_lines.around_single_line_accessor
+                }
+            }
+            DeclKind::Invocable => {
+                if multiline {
+                    blank_lines.around_invocable
+                } else {
+                    blank_lines.around_single_line_invocable
+                }
+            }
+            DeclKind::LocalMethod => {
+                if multiline {
+                    blank_lines.around_local_method
+                } else {
+                    blank_lines.around_single_line_local_method
+                }
+            }
+        };
+        value as u32
+    }
+
+    /// Whether the declaration ending at token `j` spans several lines after formatting.
+    fn decl_end_multiline(&self, j: usize) -> bool {
+        let token = &self.tokens[j];
+        if token.text(self.src) == "}" {
+            return !self.layout.inline_close(j);
+        }
+        token.ast.decl_end_multiline
+    }
+
+    /// The first token of the comment run that leads the declaration starting at `i`, when
+    /// that comment starts its own line.
+    fn declaration_comment_start(&self, i: usize) -> Option<usize> {
+        if i == 0 || !self.tokens[i - 1].kind.is_comment() {
+            return None;
+        }
+        let mut start = i - 1;
+        while start > 0
+            && self.tokens[start - 1].kind.is_comment()
+            && (start - 1 == 0 || self.tokens[start - 1].gap.newlines > 0)
+            && self.tokens[start].gap.newlines > 0
+        {
+            start -= 1;
+        }
+        if start == 0 || self.tokens[start].gap.newlines > 0 {
+            Some(start)
+        } else {
+            None
+        }
+    }
+
+    /// Whether token `i-1` closes the file's leading comment block.
+    fn leading_comment_run(&self, j: usize) -> bool {
+        self.tokens[..=j]
+            .iter()
+            .all(|token| token.kind.is_comment())
+    }
+
+    /// `AdditionalCheckForBlankLineBefore` of `BlankLinesAroundControlTransferStatement`.
+    fn separate_before(&self, i: usize) -> bool {
+        let current = (
+            self.tokens[i].ast.stmt_start_control,
+            self.tokens[i].ast.stmt_start_control_level,
+        );
+        let prev = &self.tokens[i - 1];
+        if prev.ast.stmt_end == StmtKind::None {
+            return current.0 != 0;
+        }
+        let previous = (prev.ast.stmt_end_control, prev.ast.stmt_end_control_level);
+        should_separate(current, previous)
+    }
+
+    /// `AdditionalCheckForBlankLineAfter` of `BlankLinesAroundControlTransferStatement`.
+    fn separate_after(&self, i: usize) -> bool {
+        let prev = &self.tokens[i - 1];
+        let current = (prev.ast.stmt_end_control, prev.ast.stmt_end_control_level);
+        let token = &self.tokens[i];
+        if token.ast.stmt_start == StmtKind::None {
+            return current.0 != 0;
+        }
+        let next = (
+            token.ast.stmt_start_control,
+            token.ast.stmt_start_control_level,
+        );
+        should_separate(current, next)
+    }
+
+    fn base_newlines_before(&self, i: usize) -> u32 {
         let token = &self.tokens[i];
         let prev = &self.tokens[i - 1];
         let pt = prev.text(self.src);
@@ -2162,21 +2627,16 @@ impl<'a> Emitter<'a> {
         let in_inline = self.layout.inside_inline[i];
         let cap = self.blank_cap_at(i);
 
-        // Region directives get a blank line inside their body by default.
+        // Region directives: `around_region` is the blank line before `#region`,
+        // `inside_region` the padding just after `#region` and before `#endregion`.
         if ct.starts_with("#region") && pt != "{" {
-            if let Some(blank) = self.options.blank_lines.before_region {
-                return (blank as u32 + 1).min(cap);
-            }
+            return (self.options.blank_lines.around_region as u32 + 1).min(cap);
         }
         if ct.starts_with("#endregion") {
-            if let Some(blank) = self.options.blank_lines.before_endregion {
-                return (blank as u32 + 1).min(cap);
-            }
+            return (self.options.blank_lines.inside_region as u32 + 1).min(cap);
         }
         if prev.kind == TokenKind::Directive && (pt == "#region" || pt.starts_with("#region ")) {
-            if let Some(blank) = self.options.blank_lines.after_region {
-                return (blank as u32 + 1).min(cap);
-            }
+            return (self.options.blank_lines.inside_region as u32 + 1).min(cap);
         }
 
         // Directives always own a line, but keep a blank line the author left before them.
@@ -2284,19 +2744,13 @@ impl<'a> Emitter<'a> {
             && matches!(pt, "}" | ";")
             && !matches!(ct, "}" | ";" | ")" | ",")
         {
-            let prev_multi = (pt == "}" && !self.layout.inline_close(i - 1))
-                || prev.ast.type_declaration
-                || (pt == ";" && self.ends_local_function(i - 1));
-            let cur_multi = self.member_multiline(i)
-                || token.ast.type_declaration
-                || (token.ast.member_attribute
-                    && (token.ast.attribute == AttributePlacement::OwnLine
-                        || self.attribute_list_long(i)));
+            // The default separation comes from the `blank_lines_around_*` rules applied
+            // by `blank_min_blanks`; `blank_lines_between_members` overrides it.
             let blank = self
                 .options
                 .blank_lines
                 .between_members
-                .map_or(u32::from(prev_multi || cur_multi || gap >= 2), |b| b as u32);
+                .map_or(0, |b| b as u32);
             if blank > 0 {
                 return gap.max(blank + 1).min(cap);
             }
@@ -2328,14 +2782,17 @@ impl<'a> Emitter<'a> {
             return 0;
         }
 
+        // Blanks just inside a brace are dropped by `blank_cap_at` (unless
+        // `remove_blank_lines_near_braces_*` is off), so the author's gap is kept up to
+        // the cap here.
         if ct == "}" {
             if in_inline {
                 return gap;
             }
             if pt == "{" {
-                return 1;
+                return gap.max(1).min(cap);
             }
-            return 1;
+            return gap.max(1).min(cap);
         }
 
         if pt == "{" {
@@ -2345,7 +2802,7 @@ impl<'a> Emitter<'a> {
             if token.kind == TokenKind::BlockComment && gap == 0 {
                 return 0;
             }
-            return 1;
+            return gap.max(1).min(cap);
         }
 
         if pt == ";" {
@@ -2424,8 +2881,9 @@ impl<'a> Emitter<'a> {
             ) {
                 return gap.min(cap);
             }
-            // A multi-line statement is followed by a blank line (ReSharper default).
-            return gap.max(2).min(cap);
+            // Separating blank lines are supplied by `blank_min_blanks`; keep the
+            // author's gap otherwise.
+            return gap.max(1).min(cap);
         }
 
         if let Some(blank) = self.options.blank_lines.between_members {
@@ -2435,9 +2893,7 @@ impl<'a> Emitter<'a> {
         }
 
         if pt == "#region" || pt.starts_with("#region ") {
-            if let Some(blank) = self.options.blank_lines.after_region {
-                return (blank as u32 + 1).min(cap);
-            }
+            return (self.options.blank_lines.inside_region as u32 + 1).min(cap);
         }
 
         gap.min(cap)

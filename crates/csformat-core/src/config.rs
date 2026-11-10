@@ -218,14 +218,53 @@ pub struct BlankLineOptions {
     /// Maximum number of consecutive blank lines preserved between declarations.
     /// ReSharper's `resharper_csharp_keep_blank_lines_in_declarations`.
     pub keep_in_declarations: usize,
-    /// When set, force this many blank lines between members. `None` preserves source.
+    /// Remove blank lines next to braces in code (`remove_blank_lines_near_braces_in_code`).
+    pub remove_near_braces_in_code: bool,
+    /// Remove blank lines next to braces in declarations
+    /// (`remove_blank_lines_near_braces_in_declarations`).
+    pub remove_near_braces_in_declarations: bool,
+
+    pub around_namespace: usize,
+    pub inside_namespace: usize,
+    pub after_file_scoped_namespace_directive: usize,
+    pub around_type: usize,
+    pub around_single_line_type: usize,
+    pub inside_type: usize,
+
+    pub around_field: usize,
+    pub around_single_line_field: usize,
+    pub around_property: usize,
+    pub around_single_line_property: usize,
+    pub around_auto_property: usize,
+    pub around_single_line_auto_property: usize,
+    pub around_accessor: usize,
+    pub around_single_line_accessor: usize,
+    pub around_invocable: usize,
+    pub around_single_line_invocable: usize,
+    pub around_local_method: usize,
+    pub around_single_line_local_method: usize,
+
+    pub around_region: usize,
+    pub inside_region: usize,
+    pub between_using_groups: usize,
+    pub after_using_list: usize,
+    pub after_start_comment: usize,
+    pub before_single_line_comment: usize,
+
+    pub before_control_transfer_statements: usize,
+    pub after_control_transfer_statements: usize,
+    pub before_block_statements: usize,
+    pub after_block_statements: usize,
+    pub before_multiline_statements: usize,
+    pub after_multiline_statements: usize,
+    pub before_case: usize,
+    pub after_case: usize,
+    pub around_multiline_case_section: usize,
+    pub around_block_case_section: usize,
+
+    /// Legacy key `resharper_blank_lines_between_members`: when set, force this many blank
+    /// lines between members regardless of the per-kind `around_*` options.
     pub between_members: Option<usize>,
-    /// Blank lines after an `#region` directive. `None` preserves source.
-    pub after_region: Option<usize>,
-    /// Blank lines before an `#region` directive. `None` preserves source.
-    pub before_region: Option<usize>,
-    /// Blank lines before `#endregion`.
-    pub before_endregion: Option<usize>,
 }
 
 impl Default for BlankLineOptions {
@@ -233,11 +272,146 @@ impl Default for BlankLineOptions {
         Self {
             keep_in_code: 2,
             keep_in_declarations: 2,
+            remove_near_braces_in_code: true,
+            remove_near_braces_in_declarations: true,
+            around_namespace: 1,
+            inside_namespace: 0,
+            after_file_scoped_namespace_directive: 1,
+            around_type: 1,
+            around_single_line_type: 1,
+            inside_type: 0,
+            around_field: 1,
+            around_single_line_field: 0,
+            around_property: 1,
+            around_single_line_property: 0,
+            around_auto_property: 1,
+            around_single_line_auto_property: 0,
+            around_accessor: 0,
+            around_single_line_accessor: 0,
+            around_invocable: 1,
+            around_single_line_invocable: 0,
+            around_local_method: 1,
+            around_single_line_local_method: 0,
+            around_region: 1,
+            inside_region: 1,
+            between_using_groups: 0,
+            after_using_list: 1,
+            after_start_comment: 1,
+            before_single_line_comment: 0,
+            before_control_transfer_statements: 0,
+            after_control_transfer_statements: 0,
+            before_block_statements: 0,
+            after_block_statements: 1,
+            before_multiline_statements: 0,
+            after_multiline_statements: 0,
+            before_case: 0,
+            after_case: 0,
+            around_multiline_case_section: 0,
+            around_block_case_section: 0,
             between_members: None,
-            after_region: Some(1),
-            before_region: Some(1),
-            before_endregion: Some(1),
         }
+    }
+}
+
+impl BlankLineOptions {
+    /// Apply a blank-line setting by its suffix, e.g. `blank_lines_around_type`,
+    /// `keep_blank_lines_in_code`, `remove_blank_lines_near_braces_in_declarations`.
+    /// Returns `None` when the suffix is not part of this family, otherwise whether the
+    /// value parsed.
+    fn set_editorconfig(&mut self, suffix: &str, value: &str) -> Option<bool> {
+        if let Some(rest) = suffix.strip_prefix("keep_blank_lines_") {
+            match rest {
+                "in_code" | "in_declarations" => {}
+                _ => return None,
+            }
+            let Ok(count) = value.trim().parse::<usize>() else {
+                return Some(false);
+            };
+            if rest == "in_code" {
+                self.keep_in_code = count;
+            } else {
+                self.keep_in_declarations = count;
+            }
+            return Some(true);
+        }
+        if let Some(rest) = suffix.strip_prefix("remove_blank_lines_near_braces_") {
+            match rest {
+                "in_code" | "in_declarations" | "in_parent_languages" => {}
+                _ => return None,
+            }
+            let Some(flag) = parse_bool(value) else {
+                return Some(false);
+            };
+            match rest {
+                "in_code" => self.remove_near_braces_in_code = flag,
+                "in_declarations" => self.remove_near_braces_in_declarations = flag,
+                // Parent-language braces do not occur in C# source.
+                _ => {}
+            }
+            return Some(true);
+        }
+        let rest = suffix.strip_prefix("blank_lines_")?;
+        // Legacy spellings used before ReSharper split the region options.
+        let rest = match rest {
+            "after_region" | "before_endregion" => "inside_region",
+            other => other,
+        };
+        if rest == "between_members" {
+            let Ok(count) = value.trim().parse::<usize>() else {
+                return Some(false);
+            };
+            self.between_members = Some(count);
+            return Some(true);
+        }
+        let slot = match rest {
+            "around_namespace" => &mut self.around_namespace,
+            "inside_namespace" => &mut self.inside_namespace,
+            "after_file_scoped_namespace_directive" => {
+                &mut self.after_file_scoped_namespace_directive
+            }
+            "around_type" => &mut self.around_type,
+            "around_single_line_type" => &mut self.around_single_line_type,
+            "inside_type" => &mut self.inside_type,
+            "around_field" => &mut self.around_field,
+            "around_single_line_field" => &mut self.around_single_line_field,
+            "around_property" => &mut self.around_property,
+            "around_single_line_property" => &mut self.around_single_line_property,
+            "around_auto_property" => &mut self.around_auto_property,
+            "around_single_line_auto_property" => &mut self.around_single_line_auto_property,
+            "around_accessor" => &mut self.around_accessor,
+            "around_single_line_accessor" => &mut self.around_single_line_accessor,
+            "around_invocable" => &mut self.around_invocable,
+            "around_single_line_invocable" => &mut self.around_single_line_invocable,
+            "around_local_method" => &mut self.around_local_method,
+            "around_single_line_local_method" => &mut self.around_single_line_local_method,
+            "around_region" => &mut self.around_region,
+            "inside_region" => &mut self.inside_region,
+            "between_using_groups" => &mut self.between_using_groups,
+            "after_using_list" => &mut self.after_using_list,
+            "after_start_comment" => &mut self.after_start_comment,
+            "before_single_line_comment" => &mut self.before_single_line_comment,
+            "before_control_transfer_statements" => &mut self.before_control_transfer_statements,
+            "after_control_transfer_statements" => &mut self.after_control_transfer_statements,
+            "before_block_statements" => &mut self.before_block_statements,
+            "after_block_statements" => &mut self.after_block_statements,
+            "before_multiline_statements" => &mut self.before_multiline_statements,
+            "after_multiline_statements" => &mut self.after_multiline_statements,
+            "before_case" => &mut self.before_case,
+            "after_case" => &mut self.after_case,
+            "around_multiline_case_section" => &mut self.around_multiline_case_section,
+            "around_block_case_section" => &mut self.around_block_case_section,
+            _ => return None,
+        };
+        let Ok(count) = value.trim().parse::<usize>() else {
+            return Some(false);
+        };
+        *slot = count;
+        Some(true)
+    }
+
+    /// Apply a `.DotSettings` blank-line entry by its upper-case field name.
+    fn set_dotsettings(&mut self, name: &str, value: &str) -> Option<bool> {
+        self.set_editorconfig(&name.to_ascii_lowercase(), value)
     }
 }
 
@@ -1637,68 +1811,6 @@ pub fn apply_key(
             );
             options.space.max_attribute_length_for_same_line = n;
         }
-        "resharper_keep_blank_lines_in_code" => {
-            let mut n = options.blank_lines.keep_in_code;
-            set_usize(
-                &mut n,
-                value_trim,
-                &key,
-                path,
-                applied,
-                &mut options.warnings,
-            );
-            options.blank_lines.keep_in_code = n;
-        }
-        "resharper_keep_blank_lines_in_declarations" => {
-            let mut n = options.blank_lines.keep_in_declarations;
-            set_usize(
-                &mut n,
-                value_trim,
-                &key,
-                path,
-                applied,
-                &mut options.warnings,
-            );
-            options.blank_lines.keep_in_declarations = n;
-        }
-        "resharper_blank_lines_around_region" => {
-            let mut n = options.blank_lines.before_region.unwrap_or(1);
-            set_usize(
-                &mut n,
-                value_trim,
-                &key,
-                path,
-                applied,
-                &mut options.warnings,
-            );
-            options.blank_lines.before_region = Some(n);
-            options.blank_lines.after_region = Some(n);
-            options.blank_lines.before_endregion = Some(n);
-        }
-        "resharper_blank_lines_after_region" => {
-            let mut n = 0usize;
-            set_usize(
-                &mut n,
-                value_trim,
-                &key,
-                path,
-                applied,
-                &mut options.warnings,
-            );
-            options.blank_lines.after_region = Some(n);
-        }
-        "resharper_blank_lines_before_endregion" => {
-            let mut n = 0usize;
-            set_usize(
-                &mut n,
-                value_trim,
-                &key,
-                path,
-                applied,
-                &mut options.warnings,
-            );
-            options.blank_lines.before_endregion = Some(n);
-        }
         "resharper_brace_style" => set_enum(
             &mut options.newline.before_open_brace,
             value_trim,
@@ -2048,6 +2160,23 @@ pub fn apply_key(
             ));
         }
         _ => {
+            if let Some(rest) = key.strip_prefix("resharper_") {
+                if (rest.starts_with("blank_lines_")
+                    || rest.starts_with("keep_blank_lines_")
+                    || rest.starts_with("remove_blank_lines_"))
+                    && let Some(ok) = options.blank_lines.set_editorconfig(rest, value_trim)
+                {
+                    if ok {
+                        push(&key);
+                    } else {
+                        options.warnings.push(format!(
+                            "{}: invalid value for {key}: {value_trim:?}",
+                            path.display()
+                        ));
+                    }
+                    return;
+                }
+            }
             let whitespace_key = key.starts_with("csharp_space_")
                 || key.starts_with("csharp_new_line_")
                 || key.starts_with("csharp_indent_")
@@ -2254,7 +2383,16 @@ fn apply_dotsettings_key(
             options.sort_usings = Some(b);
             push(&name, value);
         }
-        _ => {}
+        _ => {
+            let blank_lines = name.starts_with("BLANK_LINES_")
+                || name.starts_with("KEEP_BLANK_LINES_")
+                || name.starts_with("REMOVE_BLANK_LINES_NEAR_BRACES_");
+            if blank_lines && let Some(ok) = options.blank_lines.set_dotsettings(&name, value) {
+                if ok {
+                    push(&name, value);
+                }
+            }
+        }
     }
 }
 

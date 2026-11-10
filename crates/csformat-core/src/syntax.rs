@@ -26,6 +26,95 @@ pub enum AttributePlacement {
     OwnLine,
 }
 
+/// Kind of the nearest enclosing declaration. Drives the blank-line rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DeclKind {
+    #[default]
+    None,
+    Namespace,
+    Type,
+    Field,
+    Property,
+    AutoProperty,
+    Accessor,
+    Invocable,
+    LocalMethod,
+}
+
+/// Kind of a statement. Drives the blank-line rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum StmtKind {
+    #[default]
+    None,
+    Block,
+    Switch,
+    If,
+    Do,
+    While,
+    For,
+    Foreach,
+    Using,
+    Lock,
+    Try,
+    Checked,
+    UnsafeFixed,
+    Return,
+    Break,
+    Continue,
+    Throw,
+    Goto,
+    Yield,
+    Expression,
+    LocalDeclaration,
+    Other,
+}
+
+impl StmtKind {
+    /// Statements that own a single unbraced child statement.
+    #[must_use]
+    pub fn is_single_statement_owner(self) -> bool {
+        matches!(
+            self,
+            Self::If
+                | Self::Do
+                | Self::While
+                | Self::For
+                | Self::Foreach
+                | Self::Using
+                | Self::Lock
+        )
+    }
+
+    /// Statements that directly carry a control transfer.
+    #[must_use]
+    pub fn is_control_transfer(self) -> bool {
+        matches!(
+            self,
+            Self::Return | Self::Break | Self::Continue | Self::Throw | Self::Goto | Self::Yield
+        )
+    }
+
+    /// Kind of a "block statement" for the blank-line rules (see `FindBlock`).
+    #[must_use]
+    pub fn is_block_statement(self) -> bool {
+        !matches!(
+            self,
+            Self::None
+                | Self::Expression
+                | Self::LocalDeclaration
+                | Self::Return
+                | Self::Break
+                | Self::Continue
+                | Self::Throw
+                | Self::Goto
+                | Self::Yield
+                | Self::Other
+        )
+    }
+}
+
 /// Background facts about a token gathered from its position in the syntax tree.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AstInfo {
@@ -49,6 +138,12 @@ pub struct AstInfo {
     pub switch_section: bool,
     /// The enclosing switch section fits on a single source line.
     pub switch_section_inline: bool,
+    /// The first statement of the enclosing switch section owns a block
+    /// (`BLANK_LINES_AROUND_BLOCK_CASE_SECTION` before the section).
+    pub switch_section_block_first: bool,
+    /// The last statement of the enclosing switch section owns a block
+    /// (`BLANK_LINES_AROUND_BLOCK_CASE_SECTION` after the section).
+    pub switch_section_block_last: bool,
     /// The nearest enclosing declaration is a local function.
     pub local_function: bool,
     /// The nearest enclosing declaration is a type, delegate or namespace declaration.
@@ -61,6 +156,45 @@ pub struct AstInfo {
     pub matched: bool,
     /// Where ReSharper places the enclosed declaration's attribute sections.
     pub attribute: AttributePlacement,
+    /// Kind of the nearest enclosing declaration.
+    pub decl: DeclKind,
+    /// Kind of the outer declaration starting at this token.
+    pub decl_start: DeclKind,
+    /// Whether that declaration spans several source lines.
+    pub decl_multiline: bool,
+    /// Kind of the outer declaration ending at this token.
+    pub decl_end: DeclKind,
+    /// Whether that declaration spans several source lines.
+    pub decl_end_multiline: bool,
+    /// Kind of the outer statement starting at this token.
+    pub stmt_start: StmtKind,
+    /// Whether that statement spans several source lines.
+    pub stmt_start_multiline: bool,
+    /// Whether that statement (or a nested unbraced body) owns a block.
+    pub stmt_start_has_block: bool,
+    /// Kind of the outer statement ending at this token.
+    pub stmt_end: StmtKind,
+    /// Whether that statement spans several source lines.
+    pub stmt_end_multiline: bool,
+    /// Whether that statement (or a nested unbraced body) owns a block.
+    pub stmt_end_has_block: bool,
+    /// The token terminates the last `using` directive of a using list.
+    pub using_end: bool,
+    /// Whether the token belongs to a `using` directive at namespace or file scope.
+    pub using_directive: bool,
+    /// The token starts a top-level `using` directive.
+    pub using_start: bool,
+    /// The token belongs to a `using static ...` directive.
+    pub using_static: bool,
+    /// `FindControlStatement` result for the statement starting at this token, as the bit
+    /// flags of ReSharper's `ControlStatementKind`.
+    pub stmt_start_control: u8,
+    /// Nesting level of that control statement (`0` when the statement itself is one).
+    pub stmt_start_control_level: u8,
+    /// `FindControlStatement` result for the statement ending at this token.
+    pub stmt_end_control: u8,
+    /// Nesting level of that control statement.
+    pub stmt_end_control_level: u8,
 }
 
 impl AstInfo {
@@ -393,6 +527,21 @@ impl Syntax {
         let mut parent_start = token.start;
         let mut depth = 0;
         let mut nearest_decl = "";
+        let mut nearest_decl_node = None;
+        let mut decl_start = DeclKind::None;
+        let mut decl_multiline = false;
+        let mut decl_end = DeclKind::None;
+        let mut decl_end_multiline = false;
+        let mut stmt_start = StmtKind::None;
+        let mut stmt_start_multiline = false;
+        let mut stmt_start_has_block = false;
+        let mut stmt_start_control = 0u8;
+        let mut stmt_start_control_level = 0u8;
+        let mut stmt_end = StmtKind::None;
+        let mut stmt_end_multiline = false;
+        let mut stmt_end_has_block = false;
+        let mut stmt_end_control = 0u8;
+        let mut stmt_end_control_level = 0u8;
         loop {
             let node = cursor.node();
             let kind = node.kind();
@@ -413,12 +562,61 @@ impl Syntax {
             }
             if nearest_decl.is_empty() && is_member_declaration(kind) {
                 nearest_decl = kind;
+                nearest_decl_node = Some(node);
+            }
+            if is_unit_declaration(kind) {
+                let multiline = source
+                    .get(node.byte_range())
+                    .is_some_and(|text| text.contains('\n'));
+                if node.start_byte() == token.start {
+                    decl_start = decl_kind_of(kind, node);
+                    decl_multiline = multiline;
+                }
+                if node.end_byte() == token.end {
+                    decl_end = decl_kind_of(kind, node);
+                    decl_end_multiline = multiline;
+                }
+            }
+            if is_statement_kind(kind) {
+                let multiline = source
+                    .get(node.byte_range())
+                    .is_some_and(|text| text.contains('\n'));
+                if node.start_byte() == token.start {
+                    stmt_start = stmt_kind(kind);
+                    stmt_start_multiline = multiline;
+                    stmt_start_has_block = find_block(node);
+                    let (control, level) = find_control_statement(node);
+                    stmt_start_control = control;
+                    stmt_start_control_level = level;
+                }
+                if node.end_byte() == token.end {
+                    stmt_end = stmt_kind(kind);
+                    stmt_end_multiline = multiline;
+                    stmt_end_has_block = find_block(node);
+                    let (control, level) = find_control_statement(node);
+                    stmt_end_control = control;
+                    stmt_end_control_level = level;
+                }
             }
             if kind == "switch_section" && !info.switch_section {
                 info.switch_section = true;
                 info.switch_section_inline = source
                     .get(node.byte_range())
                     .is_none_or(|text| !text.contains('\n'));
+                let mut section_cursor = node.walk();
+                let mut first_block = None;
+                let mut last_block = None;
+                for child in node.named_children(&mut section_cursor) {
+                    if !is_statement_kind(child.kind()) {
+                        continue;
+                    }
+                    if first_block.is_none() {
+                        first_block = Some(find_block(child));
+                    }
+                    last_block = Some(find_block(child));
+                }
+                info.switch_section_block_first = first_block.unwrap_or(false);
+                info.switch_section_block_last = last_block.unwrap_or(false);
             }
             if kind == "do_statement" && depth == 1 {
                 // Only the terminating `;` of `do { } while (...);` is a direct child of the
@@ -427,6 +625,30 @@ impl Syntax {
             }
             if is_member_declaration(kind) && node.start_byte() == token.start {
                 info.member_start = true;
+            }
+            if depth == 1 && kind == "using_directive" {
+                info.using_directive = true;
+                if node.start_byte() == token.start {
+                    info.using_start = true;
+                    info.using_static = source
+                        .get(node.byte_range())
+                        .is_some_and(|text| text.trim_start().starts_with("using static"));
+                } else {
+                    info.using_static = source
+                        .get(node.byte_range())
+                        .is_some_and(|text| text.trim_start().starts_with("using static"));
+                }
+                if node.end_byte() == token.end {
+                    let mut sibling = node.next_named_sibling();
+                    while let Some(sib) = sibling {
+                        if sib.kind() == "comment" {
+                            sibling = sib.next_named_sibling();
+                            continue;
+                        }
+                        break;
+                    }
+                    info.using_end = sibling.is_none_or(|next| next.kind() != "using_directive");
+                }
             }
             if depth == 1 && is_named_type_declaration(kind) {
                 info.type_name = node
@@ -454,6 +676,22 @@ impl Syntax {
         info.semicolon = semicolon_kind(parent_kind);
         info.angle = angle_kind(parent_kind, token.start == parent_start);
         info.operator = operator_kind(token, parent_kind);
+        info.decl =
+            nearest_decl_node.map_or(DeclKind::None, |node| decl_kind_of(nearest_decl, node));
+        info.decl_start = decl_start;
+        info.decl_multiline = decl_multiline;
+        info.decl_end = decl_end;
+        info.decl_end_multiline = decl_end_multiline;
+        info.stmt_start = stmt_start;
+        info.stmt_start_multiline = stmt_start_multiline;
+        info.stmt_start_has_block = stmt_start_has_block;
+        info.stmt_end = stmt_end;
+        info.stmt_end_multiline = stmt_end_multiline;
+        info.stmt_end_has_block = stmt_end_has_block;
+        info.stmt_start_control = stmt_start_control;
+        info.stmt_start_control_level = stmt_start_control_level;
+        info.stmt_end_control = stmt_end_control;
+        info.stmt_end_control_level = stmt_end_control_level;
         info.local_function = nearest_decl == "local_function_statement";
         info.type_declaration = is_type_declaration(nearest_decl);
         info.attribute = if nearest_decl.is_empty() {
@@ -726,6 +964,235 @@ fn operator_kind(token: &Token, parent: &str) -> OperatorKind {
         "" => OperatorKind::None,
         _ => OperatorKind::None,
     }
+}
+
+/// Declarations that start a blank-line "unit": members plus accessors and enum members.
+fn is_unit_declaration(kind: &str) -> bool {
+    is_member_declaration(kind)
+        || matches!(kind, "accessor_declaration" | "enum_member_declaration")
+}
+
+/// Map a declaration node kind to the blank-line declaration kind.
+fn decl_kind_of(kind: &str, node: Node) -> DeclKind {
+    match kind {
+        "namespace_declaration" | "file_scoped_namespace_declaration" => DeclKind::Namespace,
+        "class_declaration"
+        | "struct_declaration"
+        | "interface_declaration"
+        | "record_declaration"
+        | "record_struct_declaration"
+        | "delegate_declaration"
+        | "enum_declaration" => DeclKind::Type,
+        "field_declaration" | "event_field_declaration" | "enum_member_declaration" => {
+            DeclKind::Field
+        }
+        "property_declaration" | "indexer_declaration" | "event_declaration" => {
+            if is_auto_property(node) {
+                DeclKind::AutoProperty
+            } else {
+                DeclKind::Property
+            }
+        }
+        "accessor_declaration" => DeclKind::Accessor,
+        "method_declaration"
+        | "constructor_declaration"
+        | "destructor_declaration"
+        | "operator_declaration"
+        | "conversion_operator_declaration" => DeclKind::Invocable,
+        "local_function_statement" => DeclKind::LocalMethod,
+        _ => DeclKind::None,
+    }
+}
+
+/// A property whose accessors are all body-less (`{ get; set; }`).
+fn is_auto_property(node: Node) -> bool {
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.named_children(&mut cursor).collect();
+    for child in children {
+        if child.kind() != "accessor_list" {
+            continue;
+        }
+        let mut inner = child.walk();
+        let accessors: Vec<Node> = child.named_children(&mut inner).collect();
+        for accessor in accessors {
+            let mut ac = accessor.walk();
+            let parts: Vec<Node> = accessor.named_children(&mut ac).collect();
+            if parts
+                .iter()
+                .any(|part| matches!(part.kind(), "block" | "arrow_expression_clause"))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+/// Statement node kinds.
+fn is_statement_kind(kind: &str) -> bool {
+    stmt_kind(kind) != StmtKind::None
+}
+
+/// Statements that own a single unbraced child statement (`SingleStatementOwnerStatements`).
+fn is_single_statement_owner(kind: &str) -> bool {
+    matches!(
+        kind,
+        "if_statement"
+            | "do_statement"
+            | "while_statement"
+            | "for_statement"
+            | "foreach_statement"
+            | "using_statement"
+            | "lock_statement"
+            | "fixed_statement"
+    )
+}
+
+/// ReSharper's `StatementSpacingUtil.GetControlStatementKind`.
+fn control_kind(node: Node) -> u8 {
+    match node.kind() {
+        "return_statement" => control::RETURN,
+        "continue_statement" => control::CONTINUE,
+        "break_statement" => control::BREAK,
+        "throw_statement" => control::THROW,
+        "goto_statement" => control::GOTO,
+        "yield_statement" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                match child.kind() {
+                    "return" => return control::YIELD_RETURN,
+                    "break" => return control::YIELD_BREAK,
+                    _ => {}
+                }
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
+fn stmt_kind(kind: &str) -> StmtKind {
+    match kind {
+        "block" => StmtKind::Block,
+        "switch_statement" => StmtKind::Switch,
+        "if_statement" => StmtKind::If,
+        "do_statement" => StmtKind::Do,
+        "while_statement" => StmtKind::While,
+        "for_statement" => StmtKind::For,
+        "foreach_statement" => StmtKind::Foreach,
+        "using_statement" => StmtKind::Using,
+        "lock_statement" => StmtKind::Lock,
+        "try_statement" => StmtKind::Try,
+        "checked_statement" | "unchecked_statement" => StmtKind::Checked,
+        "unsafe_statement" | "fixed_statement" => StmtKind::UnsafeFixed,
+        "return_statement" => StmtKind::Return,
+        "break_statement" => StmtKind::Break,
+        "continue_statement" => StmtKind::Continue,
+        "throw_statement" => StmtKind::Throw,
+        "goto_statement" => StmtKind::Goto,
+        "yield_statement" => StmtKind::Yield,
+        "expression_statement" => StmtKind::Expression,
+        "local_declaration_statement" => StmtKind::LocalDeclaration,
+        "local_function_statement" | "labeled_statement" | "empty_statement" => StmtKind::Other,
+        _ => StmtKind::None,
+    }
+}
+
+/// ReSharper's `FindBlock`: whether the statement owns (or nests an unbraced statement that
+/// owns) a block, switch or try statement.
+fn find_block(node: Node) -> bool {
+    if matches!(
+        node.kind(),
+        "block"
+            | "switch_statement"
+            | "try_statement"
+            | "checked_statement"
+            | "unchecked_statement"
+            | "unsafe_statement"
+    ) {
+        return true;
+    }
+    if !matches!(
+        node.kind(),
+        "if_statement"
+            | "do_statement"
+            | "while_statement"
+            | "for_statement"
+            | "foreach_statement"
+            | "using_statement"
+            | "lock_statement"
+            | "fixed_statement"
+            | "else_clause"
+    ) {
+        return false;
+    }
+    let mut cursor = node.walk();
+    let children: Vec<Node> = node.named_children(&mut cursor).collect();
+    children.into_iter().any(find_block)
+}
+
+/// Bit flags of ReSharper's `StatementSpacingUtil.ControlStatementKind`.
+pub mod control {
+    pub const RETURN: u8 = 1;
+    pub const BREAK: u8 = 2;
+    pub const CONTINUE: u8 = 4;
+    pub const THROW: u8 = 8;
+    pub const GOTO: u8 = 0x10;
+    pub const YIELD_RETURN: u8 = 0x20;
+    pub const YIELD_BREAK: u8 = 0x40;
+}
+
+/// ReSharper's `StatementSpacingUtil.FindControlStatement`: the control-transfer statements
+/// reached through a chain of unbraced single-statement owners, plus the nesting depth of
+/// that chain (`0` when the statement itself transfers control).
+///
+/// The result accumulates (bitwise OR) over every branch of an owner, and `else` clauses are
+/// not visited at all: ReSharper only walks *statement* children of a statement node.
+fn find_control_statement(node: Node) -> (u8, u8) {
+    fn walk(node: Node, level: &mut u8) -> u8 {
+        let kind = control_kind(node);
+        if kind != 0 {
+            return kind;
+        }
+        if !is_single_statement_owner(node.kind()) {
+            return 0;
+        }
+        *level = level.saturating_add(1);
+        let mut cursor = node.walk();
+        let mut mask = 0u8;
+        for child in node.children(&mut cursor) {
+            if is_statement_kind(child.kind()) {
+                mask |= walk(child, level);
+            }
+        }
+        mask
+    }
+
+    let mut level = 0u8;
+    let control = walk(node, &mut level);
+    (control, level)
+}
+
+/// ReSharper's `StatementSpacingUtil.ShouldSeparate`: whether two sibling statements need a
+/// blank line between them because one of them transfers control.
+#[must_use]
+pub fn should_separate(left: (u8, u8), right: (u8, u8)) -> bool {
+    let (left_kind, left_level) = left;
+    if left_kind == 0 {
+        return false;
+    }
+    let (right_kind, right_level) = right;
+    if right_kind == 0 {
+        return true;
+    }
+    if left_level != right_level {
+        return true;
+    }
+    if left_level > 1 {
+        return true;
+    }
+    left_kind != right_kind
 }
 
 fn is_member_declaration(kind: &str) -> bool {
