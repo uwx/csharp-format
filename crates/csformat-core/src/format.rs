@@ -1898,6 +1898,77 @@ impl<'a> Emitter<'a> {
         total
     }
 
+    /// Where the attribute run ending at `close` (a `]`) belongs relative to its member.
+    ///
+    /// The `place_*_attribute_on_same_line` options override the per-declaration default;
+    /// a long list, an XML doc comment above the member, or a multi-line declaration move
+    /// the run onto its own line.
+    fn attribute_placement(&self, close: usize) -> AttributePlacement {
+        let start = self.attribute_run_start(close);
+        let too_long = self.attribute_list_long(start);
+        // `decl_start` sits on the attribute section, not on the member token.
+        let declared = self.tokens[start].ast.decl_start;
+        let configured = match declared {
+            DeclKind::Field => Some(self.options.place.field_attribute_on_same_line),
+            DeclKind::Type => Some(self.options.place.type_attribute_on_same_line),
+            DeclKind::Invocable | DeclKind::LocalMethod => {
+                Some(self.options.place.method_attribute_on_same_line)
+            }
+            DeclKind::Property | DeclKind::AutoProperty => {
+                Some(self.options.place.accessorholder_attribute_on_same_line)
+            }
+            DeclKind::Accessor => Some(self.options.place.accessor_attribute_on_same_line),
+            _ => None,
+        };
+        let kind_default = match configured {
+            Some(SameLinePlacement::Always) => AttributePlacement::SameLine,
+            Some(SameLinePlacement::Never) => AttributePlacement::OwnLine,
+            Some(SameLinePlacement::IfOwnerIsSingleLine) => {
+                AttributePlacement::SameLineIfSingleLine
+            }
+            None => self.tokens[close].ast.attribute,
+        };
+        match kind_default {
+            // Fields and event fields stay on the declaration line unless the attribute
+            // list itself is too long to fit.
+            AttributePlacement::SameLine => {
+                if too_long {
+                    AttributePlacement::OwnLine
+                } else {
+                    AttributePlacement::SameLine
+                }
+            }
+            AttributePlacement::SameLineIfSingleLine => {
+                if too_long
+                    || self.member_has_doc_comment(close + 1)
+                    || self.attribute_section_multiline(close)
+                    || self.declaration_multiline(close + 1)
+                {
+                    AttributePlacement::OwnLine
+                } else {
+                    AttributePlacement::SameLine
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Last `]` of the contiguous run of attribute sections that starts at `close`.
+    fn attribute_run_end(&self, close: usize) -> usize {
+        let mut end = close;
+        while let Some(next) = self.next_code(end) {
+            if self.tokens[next].text(self.src) != "[" || !self.tokens[next].ast.member_attribute {
+                break;
+            }
+            let match_close = self.layout.match_close[next];
+            if match_close == usize::MAX {
+                break;
+            }
+            end = match_close;
+        }
+        end
+    }
+
     /// First token of the contiguous run of attribute sections that ends at `close`.
     fn attribute_run_start(&self, close: usize) -> usize {
         let mut close = close;
@@ -3487,65 +3558,27 @@ impl<'a> Emitter<'a> {
         // events and indexers keep them on the declaration line, while types, methods,
         // local functions and the rest put them on their own line. An XML doc comment
         // above the member always forces the attribute onto its own line.
-        if pt == "]" && prev.ast.member_attribute && ct == "[" {
-            // Consecutive attribute sections stay on one line unless
-            // `keep_existing_attribute_arrangement` asks for normalization.
-            if !self.options.keep.attribute_arrangement {
-                return 1;
-            }
-        } else if pt == "]" && prev.ast.member_attribute {
-            let start = self.attribute_run_start(i - 1);
-            let too_long = self.attribute_list_long(start);
-            // The `place_*_attribute_on_same_line` options override the per-kind default.
-            // `decl_start` sits on the attribute section, not on the member token.
-            let declared = self.tokens[start].ast.decl_start;
-            let configured = match declared {
-                DeclKind::Field => Some(self.options.place.field_attribute_on_same_line),
-                DeclKind::Type => Some(self.options.place.type_attribute_on_same_line),
-                DeclKind::Invocable | DeclKind::LocalMethod => {
-                    Some(self.options.place.method_attribute_on_same_line)
+        if pt == "]" && prev.ast.member_attribute {
+            // The whole run of sections shares one placement; judge it from its last `]`.
+            let placement = self.attribute_placement(self.attribute_run_end(i - 1));
+            let keep_arrangement = self.options.keep.attribute_arrangement;
+            if ct == "[" {
+                // Consecutive attribute sections stay together while they belong on the
+                // declaration line; a run that owns its line gets one section per line
+                // unless `keep_existing_attribute_arrangement` preserves the layout.
+                if placement == AttributePlacement::OwnLine && !keep_arrangement {
+                    return 1;
                 }
-                DeclKind::Property | DeclKind::AutoProperty => {
-                    Some(self.options.place.accessorholder_attribute_on_same_line)
+            } else {
+                match placement {
+                    // A run kept on the declaration line is pulled back up unless the
+                    // author's arrangement is being preserved.
+                    AttributePlacement::SameLine if !keep_arrangement => return 0,
+                    AttributePlacement::OwnLine => return 1,
+                    AttributePlacement::SameLine
+                    | AttributePlacement::SameLineIfSingleLine
+                    | AttributePlacement::None => {}
                 }
-                DeclKind::Accessor => Some(self.options.place.accessor_attribute_on_same_line),
-                _ => None,
-            };
-            let kind_default = match configured {
-                Some(SameLinePlacement::Always) => AttributePlacement::SameLine,
-                Some(SameLinePlacement::Never) => AttributePlacement::OwnLine,
-                Some(SameLinePlacement::IfOwnerIsSingleLine) => {
-                    AttributePlacement::SameLineIfSingleLine
-                }
-                None => prev.ast.attribute,
-            };
-            let placement = match kind_default {
-                // Fields and event fields stay on the declaration line unless the attribute
-                // list itself is too long to fit.
-                AttributePlacement::SameLine => {
-                    if too_long {
-                        AttributePlacement::OwnLine
-                    } else {
-                        AttributePlacement::SameLine
-                    }
-                }
-                AttributePlacement::SameLineIfSingleLine => {
-                    if too_long
-                        || self.member_has_doc_comment(i)
-                        || self.attribute_section_multiline(i - 1)
-                        || self.declaration_multiline(i)
-                    {
-                        AttributePlacement::OwnLine
-                    } else {
-                        AttributePlacement::SameLine
-                    }
-                }
-                other => other,
-            };
-            match placement {
-                AttributePlacement::SameLine => return 0,
-                AttributePlacement::OwnLine => return 1,
-                AttributePlacement::SameLineIfSingleLine | AttributePlacement::None => {}
             }
         }
         // Switch sections written on one line stay on one line (stacked labels still break).

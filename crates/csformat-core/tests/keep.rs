@@ -125,3 +125,20 @@ fn record_parameter_attributes_move_down_when_asked() {
         "record R(\n    [Obsolete]\n    int X);\n",
     );
 }
+
+#[test]
+fn attribute_sections_follow_the_run_placement() {
+    // Fields and single-line properties keep their sections on the declaration line; a run
+    // that owns its line gets one section per line unless the arrangement is kept.
+    let source = "class C\n{\n    [A] [B] int f;\n\n    [A] [B]\n    void M()\n    {\n    }\n\n    [A] [B]\n    int P { get; set; }\n}\n";
+    check(
+        source,
+        &[],
+        "class C\n{\n    [A] [B] int f;\n\n    [A]\n    [B]\n    void M()\n    {\n    }\n\n    [A] [B] int P { get; set; }\n}\n",
+    );
+    check(
+        source,
+        &["keep_existing_attribute_arrangement = true"],
+        source,
+    );
+}
