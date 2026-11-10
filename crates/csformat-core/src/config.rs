@@ -60,6 +60,46 @@ pub enum AroundBinary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BraceCategories(pub u16);
 
+/// ReSharper's `SpecialIndent` for preprocessor directives.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecialIndent {
+    /// Column zero.
+    #[default]
+    NoIndent,
+    /// Indented with the surrounding code.
+    UsualIndent,
+    /// One level less than the surrounding code.
+    Outdent,
+    /// Keep the column the directive was written at.
+    DoNotChange,
+}
+
+/// ReSharper's `ParsFormatStyle`: how the content of a parenthesis is indented.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParsIndent {
+    /// BSD/K&R: the content indents one level, the closing `)` aligns with the owner.
+    #[default]
+    Inside,
+    /// Whitesmiths: the `(` and its content share one indent level.
+    Outside,
+    /// GNU: the `(` at one level, the content at two.
+    OutsideAndInside,
+    /// No indent at all.
+    None,
+}
+
+/// ReSharper's `AlignIndentDontChangeStyle` for raw string literals.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlignIndentStyle {
+    #[default]
+    Align,
+    Indent,
+    DoNotChange,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BraceCategory {
@@ -574,6 +614,166 @@ impl Default for WrapOptions {
     }
 }
 
+/// ReSharper's `indent_*` / `outdent_*` / `continuous_indent_*` settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndentOptions {
+    pub inside_namespace: bool,
+    pub anonymous_method_block: bool,
+    pub braces_inside_statement_conditions: bool,
+    pub nested_usings: bool,
+    pub nested_fixed: bool,
+    pub nested_lock: bool,
+    pub nested_for: bool,
+    pub nested_foreach: bool,
+    pub nested_while: bool,
+    pub type_constraints: bool,
+    pub method_decl_pars: ParsIndent,
+    pub primary_constructor_decl_pars: ParsIndent,
+    pub invocation_pars: ParsIndent,
+    pub statement_pars: ParsIndent,
+    pub typeparam_angles: ParsIndent,
+    pub typearg_angles: ParsIndent,
+    pub pars: ParsIndent,
+    pub preprocessor_if: SpecialIndent,
+    pub preprocessor_region: SpecialIndent,
+    pub preprocessor_other: SpecialIndent,
+    pub raw_literal_string: AlignIndentStyle,
+    pub use_continuous_indent_inside_parens: bool,
+    pub use_continuous_indent_inside_initializer_braces: bool,
+    pub outdent_binary_ops: bool,
+    pub outdent_binary_pattern_ops: bool,
+    pub outdent_commas: bool,
+    pub outdent_dots: bool,
+    pub outdent_statement_labels: bool,
+    pub continuous_indent_multiplier: usize,
+}
+
+impl Default for IndentOptions {
+    fn default() -> Self {
+        Self {
+            inside_namespace: true,
+            anonymous_method_block: false,
+            braces_inside_statement_conditions: true,
+            nested_usings: false,
+            nested_fixed: false,
+            nested_lock: false,
+            nested_for: false,
+            nested_foreach: false,
+            nested_while: false,
+            type_constraints: true,
+            method_decl_pars: ParsIndent::Inside,
+            primary_constructor_decl_pars: ParsIndent::Inside,
+            invocation_pars: ParsIndent::Inside,
+            statement_pars: ParsIndent::Inside,
+            typeparam_angles: ParsIndent::Inside,
+            typearg_angles: ParsIndent::Inside,
+            pars: ParsIndent::Inside,
+            preprocessor_if: SpecialIndent::NoIndent,
+            preprocessor_region: SpecialIndent::UsualIndent,
+            preprocessor_other: SpecialIndent::NoIndent,
+            raw_literal_string: AlignIndentStyle::Align,
+            use_continuous_indent_inside_parens: true,
+            use_continuous_indent_inside_initializer_braces: true,
+            outdent_binary_ops: false,
+            outdent_binary_pattern_ops: false,
+            outdent_commas: false,
+            outdent_dots: false,
+            outdent_statement_labels: false,
+            continuous_indent_multiplier: 1,
+        }
+    }
+}
+
+impl IndentOptions {
+    /// Apply an `indent_*` / `outdent_*` / `continuous_indent_*` setting by its suffix.
+    /// Returns `None` when the suffix is not part of this family, otherwise whether the
+    /// value parsed.
+    fn set_resharper(&mut self, suffix: &str, value: &str) -> Option<bool> {
+        let v = value.trim().to_ascii_lowercase();
+        if suffix == "continuous_indent_multiplier" {
+            let Ok(count) = v.parse::<usize>() else {
+                return Some(false);
+            };
+            self.continuous_indent_multiplier = count;
+            return Some(true);
+        }
+        let flag = |slot: &mut bool| match parse_bool(value) {
+            Some(flag) => {
+                *slot = flag;
+                Some(true)
+            }
+            None => Some(false),
+        };
+        let special = |slot: &mut SpecialIndent| {
+            *slot = match v.as_str() {
+                "no_indent" | "none" => SpecialIndent::NoIndent,
+                "usual_indent" | "usual" => SpecialIndent::UsualIndent,
+                "outdent" => SpecialIndent::Outdent,
+                "do_not_change" => SpecialIndent::DoNotChange,
+                _ => return Some(false),
+            };
+            Some(true)
+        };
+        let pars = |slot: &mut ParsIndent| {
+            *slot = match v.as_str() {
+                "inside" | "inside_parenthesis" => ParsIndent::Inside,
+                "outside" => ParsIndent::Outside,
+                "outside_and_inside" => ParsIndent::OutsideAndInside,
+                "none" | "no_indent" => ParsIndent::None,
+                _ => return Some(false),
+            };
+            Some(true)
+        };
+        Some(match suffix {
+            "indent_inside_namespace" => return flag(&mut self.inside_namespace),
+            "indent_anonymous_method_block" => return flag(&mut self.anonymous_method_block),
+            "indent_braces_inside_statement_conditions" => {
+                return flag(&mut self.braces_inside_statement_conditions);
+            }
+            "indent_nested_usings_stmt" => return flag(&mut self.nested_usings),
+            "indent_nested_fixed_stmt" => return flag(&mut self.nested_fixed),
+            "indent_nested_lock_stmt" => return flag(&mut self.nested_lock),
+            "indent_nested_for_stmt" => return flag(&mut self.nested_for),
+            "indent_nested_foreach_stmt" => return flag(&mut self.nested_foreach),
+            "indent_nested_while_stmt" => return flag(&mut self.nested_while),
+            "indent_type_constraints" => return flag(&mut self.type_constraints),
+            "use_continuous_indent_inside_parens" => {
+                return flag(&mut self.use_continuous_indent_inside_parens);
+            }
+            "use_continuous_indent_inside_initializer_braces" => {
+                return flag(&mut self.use_continuous_indent_inside_initializer_braces);
+            }
+            "outdent_binary_ops" => return flag(&mut self.outdent_binary_ops),
+            "outdent_binary_pattern_ops" => return flag(&mut self.outdent_binary_pattern_ops),
+            "outdent_commas" => return flag(&mut self.outdent_commas),
+            "outdent_dots" => return flag(&mut self.outdent_dots),
+            "outdent_statement_labels" => return flag(&mut self.outdent_statement_labels),
+            "indent_method_decl_pars" => return pars(&mut self.method_decl_pars),
+            "indent_primary_constructor_decl_pars" => {
+                return pars(&mut self.primary_constructor_decl_pars);
+            }
+            "indent_invocation_pars" => return pars(&mut self.invocation_pars),
+            "indent_statement_pars" => return pars(&mut self.statement_pars),
+            "indent_typeparam_angles" => return pars(&mut self.typeparam_angles),
+            "indent_typearg_angles" => return pars(&mut self.typearg_angles),
+            "indent_pars" => return pars(&mut self.pars),
+            "indent_preprocessor_if" => return special(&mut self.preprocessor_if),
+            "indent_preprocessor_region" => return special(&mut self.preprocessor_region),
+            "indent_preprocessor_other" => return special(&mut self.preprocessor_other),
+            "indent_raw_literal_string" => {
+                self.raw_literal_string = match v.as_str() {
+                    "align" => AlignIndentStyle::Align,
+                    "indent" => AlignIndentStyle::Indent,
+                    "do_not_change" => AlignIndentStyle::DoNotChange,
+                    _ => return Some(false),
+                };
+                true
+            }
+            _ => return None,
+        })
+    }
+}
+
 /// Everything the layout engine needs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FormatOptions {
@@ -589,6 +789,7 @@ pub struct FormatOptions {
     pub newline: NewlineOptions,
     pub space: SpaceOptions,
     pub blank_lines: BlankLineOptions,
+    pub indent: IndentOptions,
     pub wrap: WrapOptions,
     pub preserve_single_line_blocks: bool,
     pub preserve_single_line_statements: bool,
@@ -619,6 +820,7 @@ impl Default for FormatOptions {
             newline: NewlineOptions::default(),
             space: SpaceOptions::default(),
             blank_lines: BlankLineOptions::default(),
+            indent: IndentOptions::default(),
             wrap: WrapOptions::default(),
             preserve_single_line_blocks: true,
             preserve_single_line_statements: true,
@@ -1308,6 +1510,40 @@ pub fn apply_key(
         });
     };
 
+    if let Some(rest) = key
+        .strip_prefix("resharper_indent_")
+        .map(|rest| format!("indent_{rest}"))
+        .or_else(|| {
+            key.strip_prefix("resharper_outdent_")
+                .map(|rest| format!("outdent_{rest}"))
+        })
+        .or_else(|| {
+            key.strip_prefix("resharper_continuous_indent_")
+                .map(|rest| format!("continuous_indent_{rest}"))
+        })
+        .or_else(|| {
+            key.strip_prefix("resharper_use_continuous_")
+                .map(|rest| format!("use_continuous_{rest}"))
+        })
+    {
+        if matches!(rest.as_str(), "indent_size" | "indent_style") {
+            // Handled by the general indent arms below.
+        } else {
+            match options.indent.set_resharper(&rest, value_trim) {
+                Some(true) => push(&key),
+                Some(false) => options.warnings.push(format!(
+                    "{}: invalid value for {key}: {value_trim:?}",
+                    path.display()
+                )),
+                None => options.warnings.push(format!(
+                    "{}: unsupported indent option {key}",
+                    path.display()
+                )),
+            }
+            return;
+        }
+    }
+
     if let Some(rest) = key.strip_prefix("resharper_space_") {
         match parse_bool(value_trim) {
             Some(v) => {
@@ -1323,7 +1559,7 @@ pub fn apply_key(
     }
 
     match key.as_str() {
-        "indent_style" => match v.as_str() {
+        "indent_style" | "resharper_indent_style" => match v.as_str() {
             "space" => {
                 options.indent_style = IndentStyle::Space;
                 push(&key);
@@ -1337,7 +1573,7 @@ pub fn apply_key(
                 path.display()
             )),
         },
-        "indent_size" => {
+        "indent_size" | "resharper_indent_size" => {
             if v == "tab" {
                 options.indent_size = options.tab_width;
                 push(&key);

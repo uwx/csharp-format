@@ -5,7 +5,9 @@
 //! the transformation trivially lossless: the sequence of tokens (and therefore all
 //! comments, directives and literals) is preserved exactly.
 
-use crate::config::{BraceCategory, EndOfLine, FormatOptions, IndentUnit, WrapStyle};
+use crate::config::{
+    BraceCategory, EndOfLine, FormatOptions, IndentUnit, SpecialIndent, WrapStyle,
+};
 use crate::lexer::{Token, TokenKind, lex};
 use crate::syntax::{
     AngleKind, AttributePlacement, BraceKind, BraceOwner, BracketKind, ColonKind, CommaKind,
@@ -551,6 +553,9 @@ struct Emitter<'a> {
     line_len: usize,
     /// Indent level of the line currently being written.
     cur_line_indent: i32,
+    /// Indent column of every statement that started a line, keyed by its start byte, so a
+    /// nested (brace-less) statement can indent relative to its parent statement.
+    stmt_indent: std::collections::HashMap<usize, i32>,
     /// Visual column of the current line's indentation.
     cur_line_column: i32,
     /// Indent of the line that opened the most recently closed `(`/`]`.
@@ -632,6 +637,7 @@ impl<'a> Emitter<'a> {
             seq: 0,
             line_len: 0,
             cur_line_indent: 0,
+            stmt_indent: std::collections::HashMap::new(),
             cur_line_column: 0,
             last_closed_paren_indent: None,
             preserved_line: false,
@@ -721,6 +727,9 @@ impl<'a> Emitter<'a> {
                 self.continuation_active = wrapped
                     || self.is_continuation(i)
                     || (newlines > 0 && self.continuation_active);
+                if token.ast.stmt_start != StmtKind::None {
+                    self.stmt_indent.insert(token.start, code_column);
+                }
             }
         }
 
@@ -763,6 +772,13 @@ impl<'a> Emitter<'a> {
         if text == "{" && !self.layout.brace_inline[i] {
             let open_indent = self.cur_line_column;
             let unit = self.indent_unit_columns();
+            let unit = if token.ast.brace == BraceKind::NamespaceBody
+                && !self.options.indent.inside_namespace
+            {
+                0
+            } else {
+                unit
+            };
             self.seq += 1;
             self.stack.push(Frame {
                 open_indent,
@@ -999,13 +1015,31 @@ impl<'a> Emitter<'a> {
         let unit = self.indent_unit_columns();
         let token = &self.tokens[i];
         if token.kind == TokenKind::Directive {
-            // `#region`/`#endregion` are indented with the surrounding code; conditional
-            // compilation directives stay at column zero.
+            // `indent_preprocessor_if` / `_region` / `_other` choose between column zero,
+            // the surrounding code indent, one level less, or the author's column.
             let text = token.text(self.src);
-            if text.starts_with("#region") || text.starts_with("#endregion") {
-                return self.stack.last().map_or(0, |frame| frame.content_indent);
-            }
-            return 0;
+            let indent = &self.options.indent;
+            let setting = if text.starts_with("#region") || text.starts_with("#endregion") {
+                indent.preprocessor_region
+            } else if matches!(
+                text.split_whitespace().next().unwrap_or(""),
+                "#if" | "#elif" | "#else" | "#endif"
+            ) {
+                indent.preprocessor_if
+            } else {
+                indent.preprocessor_other
+            };
+            let code = self.stack.last().map_or(0, |frame| frame.content_indent);
+            return match setting {
+                SpecialIndent::NoIndent => 0,
+                SpecialIndent::UsualIndent => code,
+                SpecialIndent::Outdent => code - unit,
+                SpecialIndent::DoNotChange => {
+                    let width = self.options.tab_width.max(1);
+                    let columns = token.gap.tabs as usize * width + token.gap.spaces as usize;
+                    i32::try_from(columns).unwrap_or(i32::MAX)
+                }
+            };
         }
         if newlines > 0 {
             // A closing delimiter on its own line aligns with the line that opened it.
@@ -1158,11 +1192,39 @@ impl<'a> Emitter<'a> {
             // may itself sit in a brace-less nested body.
             return self.cur_line_column;
         }
+        // A statement that is the direct body of another statement indents one level past
+        // that statement, except for the `indent_nested_*_stmt` kinds.
+        if newlines > 0
+            && token.ast.stmt_start != StmtKind::None
+            && token.ast.stmt_parent != StmtKind::None
+        {
+            if let Some(&parent_indent) = self.stmt_indent.get(&token.ast.stmt_parent_start) {
+                // The statement after a `label:` keeps the label's indent.
+                let step = if token.ast.stmt_parent == StmtKind::Labeled
+                    || self.flat_nested_statement(i)
+                {
+                    0
+                } else {
+                    unit
+                };
+                return parent_indent + step;
+            }
+        }
+        if newlines > 0 && token.text(self.src) == "where" && !self.options.indent.type_constraints
+        {
+            // `indent_type_constraints = false` keeps the constraint clause at the
+            // declaration's own indent.
+            return base;
+        }
         if self.is_statement_label(i) {
-            indent = match self.options.indent_labels {
-                crate::config::LabelIndent::OneLessThanCurrent => base - unit,
-                crate::config::LabelIndent::FlushLeft => 0,
-                crate::config::LabelIndent::NoChange => base,
+            indent = if self.options.indent.outdent_statement_labels {
+                base - unit
+            } else {
+                match self.options.indent_labels {
+                    crate::config::LabelIndent::OneLessThanCurrent => base - unit,
+                    crate::config::LabelIndent::FlushLeft => 0,
+                    crate::config::LabelIndent::NoChange => base,
+                }
             };
         } else if newlines > 0 && (wrapped || self.is_continuation(i)) {
             indent += self.wrap_columns();
@@ -1181,6 +1243,27 @@ impl<'a> Emitter<'a> {
             indent = self.last_code_indent;
         }
         indent
+    }
+
+    /// Whether token `i` starts a statement of the same kind as its enclosing statement,
+    /// for the kinds ReSharper controls with `indent_nested_*_stmt` (default: not indented).
+    fn flat_nested_statement(&self, i: usize) -> bool {
+        let kind = self.tokens[i].ast.stmt_start;
+        if kind == StmtKind::None || kind != self.tokens[i].ast.stmt_parent {
+            return false;
+        }
+        let indent = &self.options.indent;
+        let indented = match kind {
+            StmtKind::For => indent.nested_for,
+            StmtKind::Foreach => indent.nested_foreach,
+            StmtKind::While => indent.nested_while,
+            StmtKind::Lock => indent.nested_lock,
+            StmtKind::Using => indent.nested_usings,
+            StmtKind::UnsafeFixed => indent.nested_fixed,
+            // Other nested statements are always indented one level.
+            _ => return false,
+        };
+        !indented
     }
 
     /// Whether a directive sits between token `i` and the previous non-trivia token.
@@ -1371,6 +1454,15 @@ impl<'a> Emitter<'a> {
     fn preserved_continuation_column(&self, i: usize) -> Option<i32> {
         let token = &self.tokens[i];
         if token.gap.newlines == 0 || token.kind == TokenKind::Directive {
+            return None;
+        }
+        if token.text(self.src) == "where" && !self.options.indent.type_constraints {
+            // `indent_type_constraints = false` overrides the author's column.
+            return None;
+        }
+        if token.ast.stmt_parent != StmtKind::None && token.ast.stmt_start != StmtKind::None {
+            // A nested statement body is indented from its parent statement, not from the
+            // column the author used.
             return None;
         }
         if token.kind.is_comment() {

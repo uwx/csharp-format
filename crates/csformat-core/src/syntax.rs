@@ -68,6 +68,7 @@ pub enum StmtKind {
     Yield,
     Expression,
     LocalDeclaration,
+    Labeled,
     Other,
 }
 
@@ -84,6 +85,8 @@ impl StmtKind {
                 | Self::Foreach
                 | Self::Using
                 | Self::Lock
+                | Self::Checked
+                | Self::UnsafeFixed
         )
     }
 
@@ -168,6 +171,11 @@ pub struct AstInfo {
     pub decl_end_multiline: bool,
     /// Kind of the outer statement starting at this token.
     pub stmt_start: StmtKind,
+    /// When the token starts a statement that is the direct body of another statement,
+    /// the kind of that enclosing statement.
+    pub stmt_parent: StmtKind,
+    /// Start byte of that enclosing statement.
+    pub stmt_parent_start: usize,
     /// Whether that statement spans several source lines.
     pub stmt_start_multiline: bool,
     /// Whether that statement (or a nested unbraced body) owns a block.
@@ -533,6 +541,8 @@ impl Syntax {
         let mut decl_end = DeclKind::None;
         let mut decl_end_multiline = false;
         let mut stmt_start = StmtKind::None;
+        let mut stmt_parent = StmtKind::None;
+        let mut stmt_parent_start = 0usize;
         let mut stmt_start_multiline = false;
         let mut stmt_start_has_block = false;
         let mut stmt_start_control = 0u8;
@@ -583,6 +593,12 @@ impl Syntax {
                     .is_some_and(|text| text.contains('\n'));
                 if node.start_byte() == token.start {
                     stmt_start = stmt_kind(kind);
+                    if let Some(parent) = node.parent() {
+                        if stmt_kind(parent.kind()).is_single_statement_owner() {
+                            stmt_parent = stmt_kind(parent.kind());
+                            stmt_parent_start = parent.start_byte();
+                        }
+                    }
                     stmt_start_multiline = multiline;
                     stmt_start_has_block = find_block(node);
                     let (control, level) = find_control_statement(node);
@@ -665,7 +681,7 @@ impl Syntax {
         while cursor.goto_first_child_for_byte(token.start).is_some() {}
         let leaf = cursor.node();
 
-        info.brace = brace_kind(parent_kind);
+        info.brace = brace_kind(parent_kind, grandparent_kind);
         info.brace_owner = brace_owner(parent_kind, grandparent_kind);
         info.paren = paren_kind(parent_kind, grandparent_kind);
         info.bracket = bracket_kind(parent_kind);
@@ -683,6 +699,8 @@ impl Syntax {
         info.decl_end = decl_end;
         info.decl_end_multiline = decl_end_multiline;
         info.stmt_start = stmt_start;
+        info.stmt_parent = stmt_parent;
+        info.stmt_parent_start = stmt_parent_start;
         info.stmt_start_multiline = stmt_start_multiline;
         info.stmt_start_has_block = stmt_start_has_block;
         info.stmt_end = stmt_end;
@@ -722,9 +740,17 @@ impl Syntax {
     }
 }
 
-fn brace_kind(parent: &str) -> BraceKind {
+fn brace_kind(parent: &str, grandparent: &str) -> BraceKind {
     match parent {
         "block" => BraceKind::Block,
+        "declaration_list"
+            if matches!(
+                grandparent,
+                "namespace_declaration" | "file_scoped_namespace_declaration" | "namespace_body"
+            ) =>
+        {
+            BraceKind::NamespaceBody
+        }
         "declaration_list" => BraceKind::TypeBody,
         "enum_member_declaration_list" => BraceKind::EnumBody,
         "initializer_expression"
@@ -1094,7 +1120,8 @@ fn stmt_kind(kind: &str) -> StmtKind {
         "yield_statement" => StmtKind::Yield,
         "expression_statement" => StmtKind::Expression,
         "local_declaration_statement" => StmtKind::LocalDeclaration,
-        "local_function_statement" | "labeled_statement" | "empty_statement" => StmtKind::Other,
+        "local_function_statement" | "empty_statement" => StmtKind::Other,
+        "labeled_statement" => StmtKind::Labeled,
         _ => StmtKind::None,
     }
 }
