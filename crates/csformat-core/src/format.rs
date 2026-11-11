@@ -141,6 +141,10 @@ struct Layout {
     /// For every token, the index of the first token of the declaration it belongs to
     /// (`usize::MAX` outside declarations).
     decl_owner: Vec<usize>,
+    /// Start byte of the innermost expression whose continuation lines align with it
+    /// (assignment value, `return`/`throw` value, expression body, control condition or
+    /// ternary branch); `usize::MAX` outside such an expression.
+    expr_owner: Vec<usize>,
     /// Whether a space precedes each token; mirrors `space_between`, index 0 is `false`.
     space_before: Vec<bool>,
 }
@@ -577,6 +581,38 @@ impl Layout {
             decl_owner[i] = decl_cur;
         }
 
+        // Track the innermost expression whose continuation lines align with it. An entry
+        // lives from the introducing token (`=`, `return`, an expression body, ...) to the
+        // end of the statement or of the delimiter that contains it.
+        let mut expr_owner = vec![usize::MAX; n];
+        let mut anchors: Vec<(usize, i32)> = Vec::new();
+        let mut depth = 0i32;
+        for i in 0..n {
+            let token = &tokens[i];
+            let text = token.text(source);
+            // `depth` counts the open delimiters; an expression introduced just inside one
+            // lives on that level, so the matching closer ends it.
+            let opener = matches!(text, "(" | "[" | "{");
+            if opener {
+                depth += 1;
+            } else if matches!(text, ")" | "]" | "}") {
+                depth -= 1;
+                anchors.retain(|&(_, open)| open <= depth);
+            } else if text == ";" {
+                anchors.retain(|&(_, open)| open < depth);
+            }
+            if anchors_expression(token, source) {
+                // The anchor owns the run of tokens that follows it.
+                let key = (i + 1..n)
+                    .find(|&next| !tokens[next].is_trivia())
+                    .map_or(usize::MAX, |next| tokens[next].start);
+                expr_owner[i] = key;
+                anchors.push((key, depth));
+            } else {
+                expr_owner[i] = anchors.last().map_or(usize::MAX, |&(key, _)| key);
+            }
+        }
+
         let mut layout = Self {
             brace_match,
             brace_inline,
@@ -591,6 +627,7 @@ impl Layout {
             inside_generics,
             base_owner,
             decl_owner,
+            expr_owner,
             space_before: Vec::new(),
         };
         layout.space_before = (0..n)
@@ -608,6 +645,23 @@ impl Layout {
 /// True when every accessor in an accessor list has a semicolon body (an auto-property).
 ///
 /// `{ get; set; }` is kept on one line; `{ get => x; set { } }` is expanded.
+/// Whether the token introduces an expression whose continuation lines align with it: an
+/// assignment value, a `return`/`throw` value, an expression body, a control statement's
+/// condition, or the false branch of a conditional expression.
+fn anchors_expression(token: &Token, source: &str) -> bool {
+    match token.text(source) {
+        "=" | "return" | "throw" => true,
+        // An expression body and a lambda body both align their continuations under the
+        // body, not under the declaration or the enclosing argument.
+        "=>" => true,
+        // A parenthesised group starts a new alignment scope: an inner binary chain aligns
+        // with the first token inside the parentheses.
+        "(" => true,
+        ":" => token.ast.colon == ColonKind::Ternary,
+        _ => false,
+    }
+}
+
 /// Whether token `i` starts a type-parameter constraint clause.
 fn token_kind_is_where_clause(tokens: &[Token], source: &str, i: usize) -> bool {
     tokens[i].text(source) == "where" && tokens[i].ast.has(flags::CONSTRAINT)
@@ -849,10 +903,12 @@ struct Emitter<'a> {
     /// Indent column of every statement that started a line, keyed by its start byte, so a
     /// nested (brace-less) statement can indent relative to its parent statement.
     stmt_indent: std::collections::HashMap<usize, i32>,
-    /// Column where the expression of a statement starts, for alignment of continuation
-    /// lines; keyed by the statement's start byte.
+    /// Column where an aligned expression starts, for alignment of its continuation
+    /// lines; keyed by the expression's start byte (see `Layout::expr_owner`).
     expr_align: std::collections::HashMap<usize, i32>,
-    /// Statement whose expression starts at the next emitted token (`=`, `return`, `=>`).
+    /// Indent of the line on which that expression starts.
+    expr_indent: std::collections::HashMap<usize, i32>,
+    /// Expression whose first token comes next, after an anchor (`=`, `return`, `=>`, ...).
     pending_align: Option<usize>,
     /// Column of the first entry of a base list, keyed by its colon's token index.
     base_align: std::collections::HashMap<usize, i32>,
@@ -962,6 +1018,7 @@ impl<'a> Emitter<'a> {
             cur_line_indent: 0,
             stmt_indent: std::collections::HashMap::new(),
             expr_align: std::collections::HashMap::new(),
+            expr_indent: std::collections::HashMap::new(),
             pending_align: None,
             base_align: std::collections::HashMap::new(),
             pending_base: None,
@@ -1234,21 +1291,16 @@ impl<'a> Emitter<'a> {
             None
         };
 
-        if newlines == 0 {
-            if let Some(colon) = self.pending_base.take() {
-                let space = i > 0 && !self.at_line_start && self.should_space(i);
-                let column =
-                    i32::try_from(self.line_len).unwrap_or(i32::MAX) + if space { 1 } else { 0 };
-                self.base_align.insert(colon, column);
-            }
-            if let Some(owner) = self.pending_align.take() {
-                let space = i > 0 && !self.at_line_start && self.should_space(i);
-                let column =
-                    i32::try_from(self.line_len).unwrap_or(i32::MAX) + if space { 1 } else { 0 };
-                self.expr_align.insert(owner, column);
-            }
-        } else {
-            self.pending_align = None;
+        // The token that opens an aligned expression: where it lands is only known after
+        // the line break and indentation are written.
+        let pending_align = self.pending_align.take();
+        if newlines == 0
+            && let Some(colon) = self.pending_base.take()
+        {
+            let space = i > 0 && !self.at_line_start && self.should_space(i);
+            let column =
+                i32::try_from(self.line_len).unwrap_or(i32::MAX) + if space { 1 } else { 0 };
+            self.base_align.insert(colon, column);
         }
 
         if i > 0 {
@@ -1298,13 +1350,27 @@ impl<'a> Emitter<'a> {
             }
         }
 
+        if let Some(owner) = pending_align {
+            // A `preserved` column is the line's own start, so it serves as both the
+            // alignment anchor and the line indent the continuations grow from.
+            let column = if newlines > 0 {
+                self.cur_line_column
+            } else {
+                i32::try_from(self.line_len).unwrap_or(i32::MAX)
+            };
+            self.expr_align.insert(owner, column);
+            self.expr_indent.insert(owner, self.cur_line_column);
+        }
+
         if text == ":" && token.ast.colon == ColonKind::BaseList {
             self.pending_base = Some(i);
         }
-        if matches!(text, "=" | "=>" | "return" | "throw")
-            && token.ast.stmt_owner_start != usize::MAX
+        // Continuation alignment anchors at the start of the *innermost* expression;
+        // `Layout::expr_owner` decides which one that is for every token.
+        if anchors_expression(token, self.src)
+            && let Some(owner) = self.expression_owner(i)
         {
-            self.pending_align = Some(token.ast.stmt_owner_start);
+            self.pending_align = Some(owner);
         }
 
         let raw = token.text(self.src);
@@ -1867,6 +1933,18 @@ impl<'a> Emitter<'a> {
         indent
     }
 
+    /// Key under which the alignment of token `i`'s expression is recorded. Statements use
+    /// their start byte; tokens outside a statement (an expression body, an initializer)
+    /// use the start byte of the innermost expression that introduces them.
+    fn expression_owner(&self, i: usize) -> Option<usize> {
+        let expression = self.layout.expr_owner[i];
+        if expression != usize::MAX {
+            return Some(usize::MAX - expression);
+        }
+        let statement = self.tokens[i].ast.stmt_owner_start;
+        (statement != usize::MAX).then_some(statement)
+    }
+
     /// Column of a continuation line that starts with a binary operator, a member-access
     /// dot or a list comma, when ReSharper aligns or outdents it instead of indenting it.
     fn aligned_continuation(&self, i: usize, base: i32, unit: i32) -> Option<i32> {
@@ -1876,9 +1954,16 @@ impl<'a> Emitter<'a> {
         }
         let text = token.text(self.src);
         let options = &self.options.align;
-        let owner = token.ast.stmt_owner_start;
-        let expr = self.expr_align.get(&owner).copied();
-        let stmt = self.stmt_indent.get(&owner).copied().unwrap_or(base);
+        let owner = self.expression_owner(i);
+        let expr = owner.and_then(|owner| self.expr_align.get(&owner).copied());
+        let stmt = owner
+            .and_then(|owner| {
+                self.stmt_indent
+                    .get(&owner)
+                    .or_else(|| self.expr_indent.get(&owner))
+                    .copied()
+            })
+            .unwrap_or(base);
         if token.ast.operator == OperatorKind::Binary {
             let column = if options.multiline_binary_expressions_chain {
                 expr?
