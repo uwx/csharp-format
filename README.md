@@ -22,8 +22,8 @@ and C# 14 `extension` blocks.
   `*.DotSettings` XML, resolved per file with nearest-wins precedence.
 - **ReSharper Reformat Code parity** — verified against a real
   ReSharper-formatted codebase (see [Status](#status)).
-- **Fast** — a native binary; about 80 ms for an 871-line file, versus 0.5 s
-  for CSharpier, 1.9 s for `dotnet format whitespace` and 10.3 s for the
+- **Fast** — a native binary; about 40 ms for a 992-line file, versus 0.45 s
+  for CSharpier, 1.9 s for `dotnet format whitespace` and 10.2 s for the
   ReSharper CLI on the same machine (see [BENCHMARK.md](BENCHMARK.md)).
 - **Practical CLI** — format in place, check (exit code for CI), unified diff,
   stdin, resolved-config inspection, and a corpus verification harness.
@@ -213,23 +213,27 @@ diffs it against our formatter.
 
 ## Performance
 
-Measured on an 871-line NFM-World file (`Mad/Gameplay/RacePhase.cs`), best of
+Measured on a 992-line NFM-World file (`Mad/Gameplay/RacePhase.cs`), best of
 three runs on the same machine. Full matrix (20-file runs, dirty input,
 correctness checks, methodology) in [BENCHMARK.md](BENCHMARK.md).
 
-| Formatter | 1 file | 20 files (~17k lines) |
+| Formatter | 1 file | 20 files (~20k lines) |
 | --- | ---: | ---: |
-| `csharp-format format` | **80 ms** | **117 ms** |
-| `csharpier format` (1.3.0) | 490 ms | 666 ms |
-| `dotnet-fastformat` (1.5.0) | 591 ms | 912 ms |
-| `dotnet format whitespace` | 1,905 ms | 2,086 ms |
-| ReSharper CLI `jb cleanupcode` (2026.2.4.1) | 10,274 ms | 16,140 ms |
+| `csharp-format format` | **41 ms** | **92 ms** |
+| `csharpier format` (1.3.0) | 451 ms | 632 ms |
+| `dotnet-fastformat` (1.5.0) | 595 ms | 882 ms |
+| `dotnet format whitespace` | 1,922 ms | 2,223 ms |
+| ReSharper CLI `jb cleanupcode` (2026.2.4.1) | 10,227 ms | 15,827 ms |
 
 All figures are end-to-end command times and include process startup; the .NET
 tools pay a runtime/workspace-load cost before they touch a file, while our
-binary is native. On already-formatted input `csharp-format` reproduces the
-file byte for byte (ReSharper and the Roslyn formatters also leave it alone;
-CSharpier reprints it to its own style).
+binary is native. Formatting a further copy of the file costs about 2.7 ms.
+
+On already-formatted input `csharp-format` reproduces the file byte for byte
+(ReSharper and the Roslyn formatters also leave it alone; CSharpier reprints it
+to its own style). That no-op property is a test, not just a claim:
+`fixtures/noop_layout.cs` is a ReSharper-formatted file the formatter must not
+touch.
 
 ## Design invariants
 
