@@ -22,4 +22,21 @@ class A
     void N()
     {
     }
+
+    int S
+    {
+        get => 1;
+    }
+
+    int T
+    {
+        get;
+        set => F = value;
+    }
+
+    int U
+    {
+        get => 1;
+        set => F = value;
+    }
 }

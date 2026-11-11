@@ -771,6 +771,13 @@ fn accessor_list_flags(
     let mut simple = true;
     let mut j = open + 1;
     while j < close {
+        // An accessor with an expression body is not body-less, so it never counts as an
+        // abstract accessor holder.
+        if tokens[j].text(source) == "=>" {
+            bodyless = false;
+            j += 1;
+            continue;
+        }
         if tokens[j].text(source) == "{" {
             bodyless = false;
             let body_close = brace_match[j];
@@ -3283,15 +3290,23 @@ impl<'a> Emitter<'a> {
         let blank_lines = &self.options.blank_lines;
         let max = self.blank_max_blanks(i);
 
+        let near_brace = matches!(pt, "{" | "}") || ct == "}";
         // Region padding: `around_region` is a minimum, `inside_region` is exact.
         let after_region_start =
             prev.kind == TokenKind::Directive && (pt == "#region" || pt.starts_with("#region "));
         if ct.starts_with("#endregion") || after_region_start {
             let inside = blank_lines.inside_region as u32;
+            if near_brace {
+                // A block brace next to a region has no padding of its own.
+                return (0, max);
+            }
             return (inside, inside);
         }
         if ct.starts_with("#region") || (prev.kind == TokenKind::Directive && pt == "#endregion") {
             let around = blank_lines.around_region as u32;
+            if near_brace {
+                return (0, max);
+            }
             return (around, max.max(around));
         }
 
@@ -3516,7 +3531,7 @@ impl<'a> Emitter<'a> {
         }
 
         // The first code token after the file's leading comment block.
-        if prev.kind.is_comment() && self.leading_comment_run(i - 1) {
+        if prev.kind.is_comment() && !token.kind.is_comment() && self.leading_comment_run(i - 1) {
             min = min.max(blank_lines.after_start_comment as u32);
         }
 
