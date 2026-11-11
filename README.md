@@ -262,6 +262,15 @@ touch.
   for the parity target.
 - Files that already contain syntax errors are formatted on a best-effort basis
   and are not treated as failures unless `--strict` is used.
+- **Inactive preprocessor branches are formatted too.** ReSharper knows the
+  project's `DefineConstants` (or the solution it is run on) and leaves code
+  inside `#if`/`#else` branches that are not compiled byte-identical; this
+  formatter has no project model, so it treats every branch as live. On the
+  NFM-World tree this is the only remaining source of differences (2 files).
+- **`insert_final_newline` defaults to false**, so a file that does not set the
+  key loses its trailing newline. This is a standalone default, independent of
+  ReSharper: set `insert_final_newline = true` (as NFM-World does) to keep the
+  newline, or `= false` to strip it explicitly.
 
 ## Publishing
 

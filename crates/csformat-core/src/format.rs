@@ -174,7 +174,9 @@ impl Layout {
         let mut delimiters: Vec<usize> = Vec::new();
         for (i, token) in tokens.iter().enumerate() {
             match token.text(source) {
-                "(" | "[" | "{" => delimiters.push(i),
+                // `?[` is a single token (null-conditional element access) but it still
+                // opens a bracket.
+                "(" | "[" | "?[" | "{" => delimiters.push(i),
                 ")" | "]" | "}" => {
                     if let Some(open) = delimiters.pop() {
                         match_close[open] = i;
@@ -377,6 +379,40 @@ impl Layout {
             }
         }
 
+        // An initializer whose body no longer fits is re-flowed: ReSharper moves its brace
+        // down and wraps the elements instead of keeping the one-line form.
+        let reflow_limit = if options.wrap.enabled {
+            options.wrap.max_length.or(options.max_line_length)
+        } else {
+            None
+        };
+        for open in 0..n {
+            if !brace_inline[open] || tokens[open].ast.brace != BraceKind::Initializer {
+                continue;
+            }
+            let close = brace_match[open];
+            if close == usize::MAX {
+                continue;
+            }
+            let overflows = reflow_limit
+                .is_some_and(|limit| single_line_width(source, tokens, open, close) > limit);
+            // A re-flowed initializer also expands when its element limit forces breaks.
+            let limited = !options.keep.initializer_arrangement
+                && options
+                    .wrap
+                    .max_initializer_elements_on_line
+                    .is_some_and(|max| top_level_elements(source, tokens, open, close) > max);
+            if overflows || limited {
+                brace_inline[open] = false;
+            }
+            if limited {
+                // The limits of a re-flowed initializer re-expand it.
+                for slot in &mut collapsed[open..=close] {
+                    *slot = false;
+                }
+            }
+        }
+
         let mut inline_depth = 0usize;
         for (i, token) in tokens.iter().enumerate() {
             let text = token.text(source);
@@ -475,6 +511,7 @@ impl Layout {
                         | CommaKind::BaseList
                         | CommaKind::VariableDeclaration
                         | CommaKind::Constraints
+                        | CommaKind::Initializer
                         | CommaKind::Other
                 );
             let before_operator = options.wrap.before_binary_opsign
@@ -546,7 +583,7 @@ impl Layout {
                 inside_generics[i] = angle_depth > 0;
             }
             match text {
-                "(" | "[" | "{" => open_stack.push(i),
+                "(" | "[" | "?[" | "{" => open_stack.push(i),
                 ")" | "]" | "}" => {
                     open_stack.pop();
                 }
@@ -658,6 +695,9 @@ fn anchors_expression(token: &Token, source: &str) -> bool {
         // with the first token inside the parentheses.
         "(" => true,
         ":" => token.ast.colon == ColonKind::Ternary,
+        // The true branch of a conditional expression indents past the `?` like any other
+        // expression continuation.
+        "?" => token.ast.operator == OperatorKind::Ternary,
         _ => false,
     }
 }
@@ -723,6 +763,33 @@ fn range_collapsible(source: &str, tokens: &[Token], open: usize, close: usize) 
         }
     }
     true
+}
+
+/// Number of elements in the list delimited by `open..close`.
+fn top_level_elements(source: &str, tokens: &[Token], open: usize, close: usize) -> usize {
+    let mut depth = 0i32;
+    let mut count = 1usize;
+    for token in &tokens[open + 1..close] {
+        match token.text(source) {
+            "(" | "[" | "?[" | "{" => depth += 1,
+            ")" | "]" | "}" => depth -= 1,
+            "," if depth == 0 => count += 1,
+            _ => {}
+        }
+    }
+    count
+}
+
+/// Width of `open..=close` as written in the source, including the column `open` starts at.
+fn single_line_width(source: &str, tokens: &[Token], open: usize, close: usize) -> usize {
+    let prefix = source
+        .get(..tokens[open].start)
+        .and_then(|head| head.rfind('\n'))
+        .map_or(tokens[open].start, |newline| {
+            tokens[open].start - newline - 1
+        });
+    let span = tokens[close].end.saturating_sub(tokens[open].start);
+    prefix + span
 }
 
 /// Whether `open..=close` would stay within `limit` columns when written on one line.
@@ -2363,19 +2430,19 @@ impl<'a> Emitter<'a> {
     /// Whether token `i` should start a wrapped line because the *next* run of tokens
     /// would not fit on the current one.
     fn should_wrap(&self, i: usize) -> bool {
-        // A construct whose written breaks are being removed stays on one line; the
-        // collapse pass already checked that it fits.
-        if self.layout.collapsed[i] || self.layout.paren_tight[i] {
-            return false;
-        }
         // `force_chop_compound_*` puts every operand of a compound condition on its own line.
         if self.force_chop_operand(i) {
             return true;
         }
         // Chopped lists and per-line element limits force breaks regardless of the
-        // current line length.
+        // current line length (a re-flowed initializer keeps its element limit).
         if self.group_break(i) {
             return true;
+        }
+        // A construct whose written breaks are being removed stays on one line; the
+        // collapse pass already checked that it fits.
+        if self.layout.collapsed[i] || self.layout.paren_tight[i] {
+            return false;
         }
         // Lines that already were continuations of an aligned expression in the source are
         // left alone; ReSharper keeps their layout.
@@ -2424,6 +2491,11 @@ impl<'a> Emitter<'a> {
         if !self.layout.wrap_candidate[i] || self.layout.inside_inline[i] {
             return false;
         }
+        // Inside an initializer body ReSharper wraps between elements only: an element
+        // (`A = 0`) is never split at its own `=` or operator.
+        if self.inside_initializer_element(i) {
+            return false;
+        }
         // Switch-expression arms keep their source layout (the whole expression is usually
         // already formatted by ReSharper).
         if self
@@ -2466,6 +2538,20 @@ impl<'a> Emitter<'a> {
             j += 1;
         }
         self.line_len + width > limit
+    }
+
+    /// Whether token `i` sits inside an initializer body but does not start one of its
+    /// elements.
+    fn inside_initializer_element(&self, i: usize) -> bool {
+        let open = self.layout.enclosing_open[i];
+        if open == usize::MAX || self.tokens[open].ast.brace != BraceKind::Initializer {
+            return false;
+        }
+        self.prev_code(i).is_some_and(|prev| {
+            prev != open
+                && !(self.tokens[prev].text(self.src) == ","
+                    && self.layout.enclosing_open[prev] == open)
+        })
     }
 
     fn is_continuation(&self, i: usize) -> bool {
@@ -2529,7 +2615,6 @@ impl<'a> Emitter<'a> {
                     | CommaKind::BaseList
                     | CommaKind::Constraints
                     | CommaKind::VariableDeclaration
-                    | CommaKind::Initializer
                     | CommaKind::TypeArguments
                     | CommaKind::TypeParameters
                     | CommaKind::Other
@@ -2714,16 +2799,49 @@ impl<'a> Emitter<'a> {
         if close == usize::MAX {
             return;
         }
-        let multiline = (open + 1..=close).any(|j| self.tokens[j].gap.newlines > 0);
-        let width: usize = (open..=close)
+        // A break of the group's *own* elements (a comma or the closing delimiter on its own
+        // line, not a break inside a nested construct) means the author already chopped it.
+        // The list is chopped when a break sits at one of *its own* separator positions: right
+        // after the `(`, after a top-level comma, or before the `)`. A break inside a single
+        // element (a lambda body, a nested initializer) is not a chopped list.
+        let mut multiline = false;
+        for j in open + 1..=close {
+            if self.tokens[j].gap.newlines == 0 || self.layout.enclosing_open[j] != open {
+                continue;
+            }
+            let boundary = j == open + 1
+                || self.prev_code(j).is_some_and(|prev| {
+                    prev == open
+                        || (self.tokens[prev].text(self.src) == ","
+                            && self.layout.enclosing_open[prev] == open
+                            && !self.layout.inside_generics[prev])
+                });
+            if boundary {
+                multiline = true;
+                break;
+            }
+        }
+        // Measure how far the list would reach on the opener's line: stop where a line break
+        // already exists, otherwise a nested construct that must span lines would make every
+        // enclosing list look too long and chop it.
+        let width: usize = (open + 1..=close)
+            .take_while(|&j| self.tokens[j].gap.newlines == 0)
             .map(|j| {
                 let len = self.tokens[j].text(self.src).chars().count();
-                len + usize::from(j > open && self.layout.space_before[j])
+                len + usize::from(self.layout.space_before[j])
             })
             .sum();
+        // With a single element there is no comma to chop at, so wrapping inside the
+        // delimiters would only move one argument: ReSharper leaves such a line long.
+        let has_separator = (open + 1..close).any(|j| {
+            self.tokens[j].text(self.src) == ","
+                && self.layout.enclosing_open[j] == open
+                && !self.layout.inside_generics[j]
+        });
         let too_long = self
             .wrap_limit()
-            .is_some_and(|limit| self.line_len + width > limit);
+            .is_some_and(|limit| self.line_len + width > limit)
+            && has_separator;
         let chop = match spec.style {
             WrapStyle::WrapIfLong => false,
             WrapStyle::ChopAlways if spec.keeps_simple_inline => multiline || too_long,
@@ -2732,8 +2850,28 @@ impl<'a> Emitter<'a> {
         };
         self.group_chop[open] = Some(chop);
         if let Some(max) = spec.max_on_line {
+            // ReSharper only applies the element limit of an initializer, pattern or switch
+            // body while it is re-flowing it; with `keep_existing_*_arrangement` on (the
+            // default) the author's element grouping survives.
             let elements = self.group_element_count(open);
-            self.group_open_break[open] = elements > max;
+            self.group_open_break[open] = elements > max && self.max_on_line_applies(open);
+        }
+    }
+
+    /// Whether the `max_*_elements_on_line` limit of this group is enforced while its
+    /// arrangement is kept.
+    fn max_on_line_applies(&self, open: usize) -> bool {
+        let keep = &self.options.keep;
+        match self.tokens[open].ast.brace {
+            BraceKind::Initializer => !keep.initializer_arrangement,
+            BraceKind::Pattern => !keep.property_patterns_arrangement,
+            BraceKind::SwitchExpression => !keep.switch_expression_arrangement,
+            _ => match self.tokens[open].ast.bracket {
+                BracketKind::ListPattern | BracketKind::CollectionExpression => {
+                    !keep.list_patterns_arrangement
+                }
+                _ => true,
+            },
         }
     }
 
@@ -2800,6 +2938,23 @@ impl<'a> Emitter<'a> {
             .sum()
     }
 
+    /// Width of `from..to` as far as it reaches on one line: the run ends at the first token
+    /// that already starts a new line. A nested construct that must span lines therefore does
+    /// not make an enclosing list look longer than its first line.
+    fn span_width_first_line(&self, from: usize, to: usize) -> usize {
+        let mut width = 0;
+        for j in from..to {
+            if j > from && self.tokens[j].gap.newlines > 0 {
+                break;
+            }
+            width += self.tokens[j].text(self.src).chars().count();
+            if j > from && self.layout.space_before[j] {
+                width += 1;
+            }
+        }
+        width
+    }
+
     /// Whether the declaration whose base list starts at `colon` has a primary constructor.
     fn primary_ctor(&self, colon: usize) -> bool {
         let Some(prev) = self.prev_code(colon) else {
@@ -2831,7 +2986,7 @@ impl<'a> Emitter<'a> {
             return Some(false);
         }
         let limit = self.wrap_limit()?;
-        let width = self.span_width(prev, close + 1);
+        let width = self.span_width_first_line(prev + 1, close + 1);
         let space = usize::from(self.layout.space_before[i]);
         Some(self.line_len + space + width > limit)
     }
@@ -3143,16 +3298,30 @@ impl<'a> Emitter<'a> {
     }
 
     fn group_break(&self, i: usize) -> bool {
+        // Forced breaks of a chopped base list or multi-declarator declaration.
         if self.chop_break(i) {
             return true;
         }
+        // Trivia is not an element: the break belongs to the next code token, so a trailing
+        // comment stays on the line it was written on.
+        if self.tokens[i].is_trivia() {
+            return false;
+        }
         let open = self.layout.enclosing_open[i];
-        if open == usize::MAX || self.layout.inside_inline[i] {
+        if open == usize::MAX {
             return false;
         }
         let Some(spec) = self.group_spec(open) else {
             return false;
         };
+        // An initializer that is being re-flowed keeps its element limit even though its
+        // braces are treated as inline.
+        let limited = spec.max_on_line.is_some() && self.max_on_line_applies(open);
+        if (self.layout.inside_inline[i] || self.layout.collapsed[i] || self.layout.paren_tight[i])
+            && !limited
+        {
+            return false;
+        }
         let text = self.tokens[i].text(self.src);
         let chopped = self.group_chop[open] == Some(true);
         // A `for` header is chopped at its semicolons; its commas stay put.
@@ -3174,13 +3343,15 @@ impl<'a> Emitter<'a> {
             }
         }
         if chopped && !is_for {
-            if text == "," && spec.before_comma {
+            // Commas inside a generic argument list separate type arguments, not elements.
+            if text == "," && spec.before_comma && !self.layout.inside_generics[i] {
                 return true;
             }
             if let Some(prev) = prev {
                 if !spec.before_comma
                     && self.tokens[prev].text(self.src) == ","
                     && self.layout.enclosing_open[prev] == open
+                    && !self.layout.inside_generics[prev]
                 {
                     return true;
                 }
@@ -3190,6 +3361,7 @@ impl<'a> Emitter<'a> {
             if self.tokens[prev].text(self.src) == ","
                 && self.layout.enclosing_open[prev] == open
                 && self.group_elems[open] >= max
+                && self.max_on_line_applies(open)
             {
                 return true;
             }
@@ -3445,7 +3617,7 @@ impl<'a> Emitter<'a> {
                         || self.attribute_list_long(i)));
             min = min.max(self.around_decl_min(token.ast.decl_start, multiline));
         }
-        if token.kind.is_comment() {
+        if token.kind.is_comment() && prev.kind != TokenKind::Directive {
             if let Some(next) = self.next_code(i) {
                 let decl = &self.tokens[next];
                 if decl.ast.member_start
@@ -3536,7 +3708,7 @@ impl<'a> Emitter<'a> {
         }
 
         // The first non-using token after the last `using` of a using list.
-        if prev.ast.using_end && ct != "#endif" {
+        if prev.ast.using_end && token.kind != TokenKind::Directive {
             min = min.max(blank_lines.after_using_list as u32);
         }
 
@@ -3835,6 +4007,11 @@ impl<'a> Emitter<'a> {
 
         if ct == "{" {
             if self.layout.brace_inline[i] {
+                // A single-line body stays inline, but ReSharper keeps the author's break
+                // before a pattern brace (`x is` on one line, `{ } y` on the next).
+                if token.ast.brace == BraceKind::Pattern {
+                    return gap.min(cap);
+                }
                 return 0;
             }
             if prev.kind == TokenKind::LineComment {
@@ -4459,6 +4636,10 @@ fn space_between(
     // `..` keeps the author's spacing except inside a list pattern, which has its own
     // preference (`within_slice_pattern`).
     if pt == ".." {
+        // A slice with no right operand (`[1, ..]`) never takes a space before the closer.
+        if matches!(ct, "]" | ")" | "}") {
+            return false;
+        }
         let open = layout.enclosing_open[i - 1];
         if open != usize::MAX && tokens[open].ast.bracket == BracketKind::ListPattern {
             return rsharp_space(options, "within_slice_pattern", true);

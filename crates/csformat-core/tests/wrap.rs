@@ -501,3 +501,205 @@ fn compound_chop_is_per_statement_and_aligns_with_the_condition() {
 ";
     assert_eq!(format(source, &do_options), do_chopped);
 }
+
+// A chopped parameter list breaks at its own commas only: the commas of a generic argument
+// list inside a parameter are not separators (probe: `UI/Components/SettingsView.cs`).
+#[test]
+fn chopped_parameters_do_not_break_inside_generic_arguments() {
+    let mut options = options();
+    options.wrap.parameters = WrapStyle::ChopIfLong;
+    let source = "class C
+{
+    private sealed class InputView(KeyboardNavigation navigation, Func<Key, bool> handleKey, Func<bool> capturing, Func<bool> previewActive, Func<UiState.RaceState?> menuHudPreview, Func<bool> hudPreviewActive) : View
+    {
+    }
+}
+";
+    let expected = "class C
+{
+    private sealed class InputView(
+        KeyboardNavigation navigation,
+        Func<Key, bool> handleKey,
+        Func<bool> capturing,
+        Func<bool> previewActive,
+        Func<UiState.RaceState?> menuHudPreview,
+        Func<bool> hudPreviewActive) : View
+    {
+    }
+}
+";
+    assert_eq!(format(source, &options), expected);
+}
+
+// A single lambda argument that spans lines does not make the enclosing call "chopped".
+#[test]
+fn a_lambda_body_break_does_not_chop_the_argument_list() {
+    let mut options = options();
+    options.wrap.arguments = WrapStyle::ChopIfLong;
+    options.wrap.max_length = Some(130);
+    let source = "class C
+{
+    void M()
+    {
+        var inside = hit.Any(target =>
+            target.Id == 1 && target.Name == \"x\");
+    }
+}
+";
+    let expected = "class C
+{
+    void M()
+    {
+        var inside = hit.Any(target =>
+            target.Id == 1 && target.Name == \"x\");
+    }
+}
+";
+    assert_eq!(format(source, &options), expected);
+}
+
+// With a single argument there is no comma to chop at, so a long call is left long
+// (probe: `new ColorRamp(colors.Select(...).ToArray())` in NFM-World).
+#[test]
+fn a_long_call_with_one_argument_is_not_chopped() {
+    let mut options = options();
+    options.wrap.arguments = WrapStyle::ChopIfLong;
+    options.wrap.max_length = Some(130);
+    let source = "class C
+{
+    void M()
+    {
+        var ramp = new ColorRamp(colors.Select((c, i) => (colorPos?[i] ?? (float)i / (colors.Length - 1), c)).ToArray());
+    }
+}
+";
+    let expected = "class C
+{
+    void M()
+    {
+        var ramp = new ColorRamp(colors.Select((c, i) => (colorPos?[i] ?? (float)i / (colors.Length - 1), c)).ToArray());
+    }
+}
+";
+    assert_eq!(format(source, &options), expected);
+}
+
+// An initializer that does not fit is filled, and the elements stay at the brace indent.
+#[test]
+fn a_long_initializer_fills_and_keeps_the_element_indent() {
+    let mut options = options();
+    options.wrap.max_length = Some(130);
+    let mut elements = Vec::new();
+    for n in 1..=40 {
+        elements.push(format!("\"e{n}\""));
+    }
+    let source = format!(
+        "class C
+{{
+    void M()
+    {{
+        var names = new HashSet<string>(StringComparer.Ordinal)
+        {{
+            {}
+        }};
+    }}
+}}
+",
+        elements.join(", ")
+    );
+    // ReSharper fills 18 / 16 / 6 elements per line at 130 columns.
+    let line = |range: std::ops::Range<usize>| elements[range].join(", ");
+    let expected = format!(
+        "class C
+{{
+    void M()
+    {{
+        var names = new HashSet<string>(StringComparer.Ordinal)
+        {{
+            {},
+            {},
+            {}
+        }};
+    }}
+}}
+",
+        line(0..18),
+        line(18..34),
+        line(34..40)
+    );
+    assert_eq!(format(&source, &options), expected);
+}
+
+// `max_initializer_elements_on_line` only applies while the initializer is re-flowed
+// (`keep_existing_initializer_arrangement = false`); ReSharper keeps the author's grouping
+// with the default `keep_existing_*` setting.
+#[test]
+fn the_initializer_element_limit_only_applies_when_reflowing() {
+    let mut kept = options();
+    kept.wrap.max_length = Some(130);
+    kept.wrap.max_initializer_elements_on_line = Some(1);
+    let mut reflowed = kept.clone();
+    reflowed.keep.initializer_arrangement = false;
+    let source = "class C
+{
+    void M()
+    {
+        var values = new Foo
+        {
+            A = 0, B = 1, C = 2, D = 3, E = 4, F = 5, A = 6, B = 7, C = 8, D = 9, E = 10, F = 11, A = 12, B = 13
+        };
+    }
+}
+";
+    assert_eq!(format(source, &kept), source);
+    let expected = "class C
+{
+    void M()
+    {
+        var values = new Foo
+        {
+            A = 0,
+            B = 1,
+            C = 2,
+            D = 3,
+            E = 4,
+            F = 5,
+            A = 6,
+            B = 7,
+            C = 8,
+            D = 9,
+            E = 10,
+            F = 11,
+            A = 12,
+            B = 13
+        };
+    }
+}
+";
+    assert_eq!(format(source, &reflowed), expected);
+}
+
+// A call chain in the true branch of a conditional indents past the `?` line.
+#[test]
+fn a_ternary_true_branch_chain_indents_under_the_question_mark() {
+    let mut options = options();
+    options.wrap.max_length = Some(130);
+    options.wrap.chained_method_calls = true;
+    let source = "class C
+{
+    void M()
+    {
+        console.RegisterArgumentAutocompleter(
+            \"create\",
+            (args, position) =>
+                position == 0
+                    ? BackendGameSparker.stage_parts.Select(part => part.FileName)
+                        .Concat(BackendGameSparker.vendor_stage_parts.Select(part => part.FileName))
+                        .ToArray()
+                    : []
+        );
+    }
+}
+";
+    assert_eq!(format(source, &options), source);
+}

@@ -6,6 +6,15 @@ using System;
 
 namespace Fixture
 {
+    public sealed class Region
+    {
+        #region Inner
+
+        private int _value;
+
+        #endregion
+    }
+
     public sealed class Layout
     {
         private readonly int[] _items = [];
@@ -63,5 +72,23 @@ namespace Fixture
         }
 
         #endregion
+
+        public bool StartsWithHeader(ReadOnlySpan<byte> span)
+        {
+            return span is [(byte)'D', (byte)'D', (byte)'S', (byte)' ', ..];
+        }
+
+        public int? Pick(Node[]? nodes, int index)
+        {
+            return nodes?[index];
+        }
+
+        public string Name(Options? options)
+        {
+            return options?.Value?.FirstOrDefault(candidate => candidate.Id == _id) is
+                { } skin
+                ? skin.Name
+                : "";
+        }
     }
 }
